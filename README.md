@@ -125,6 +125,9 @@ UI: book list → player (title, chapter, time, progress bar, prev/play/next/bac
 - Prefetching is not live during playback (single loop); upgrade path is a download task on core 0.
 - No battery on this board — USB-C only, backlight always on.
 - BookOrbit's API is unofficial; if a route moves, only `sidecar.py` has to change.
+- License: GPL-3.0 for project code (`LICENSE`); `firmware/` drivers are vendored and keep their upstream
+  licenses (`THIRD-PARTY-NOTICES.md`). Six of them carry no license notice at all, so they cannot be
+  relicensed, and the firmware binary is GPL-3.0 covered because it links ESP32-audioI2S.
 - Not run on hardware from here: the sketch is unverified on a real board.
 - The image builds and runs (healthcheck green, uid 1000, read-only root, cache write verified through the
   bind mount). Endpoints were checked against a mock BookOrbit shaped like `packages/types/src/audiobook.ts`
