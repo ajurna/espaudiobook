@@ -1,0 +1,6 @@
+cache/
+.scratch/
+*.part
+data/
+.env
+certs/
