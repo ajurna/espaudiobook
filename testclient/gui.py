@@ -136,6 +136,7 @@ class Gui:
             self.button(label, lambda e, l=label: self.act(l), dx, dy)
 
     def act(self, what):
+        c.log(f"{what} -> view {self.view} cursor {self.cursor}")
         if what == "back":
             self.view = self.stack.pop() if self.stack else "authors"
             if self.view == "authors":
@@ -184,6 +185,7 @@ class Gui:
 
     def play_chapter(self):
         ch = self.chapters[self.idx]
+        c.log(f"play chapter {self.idx} ({ch['title']}) asset {ch['assetId']}")
         st, length, body, first, total = c.call(f"/track/{self.book['id']}/{ch['assetId']}",
                                                 stream=True, token=self.token,
                                                 query={"chapter": self.idx})
@@ -211,6 +213,7 @@ class Gui:
     def report(self):
         if not self.chapters:
             return
+        c.log(f"report {fmt(self.pos_ms)} -> {self.chapters[self.idx]['assetId']}")
         c.call(f"/books/{self.book['id']}/state", "PUT",
                {"assetId": self.chapters[self.idx]["assetId"], "positionMs": self.pos_ms}, token=self.token)
 
@@ -245,12 +248,14 @@ class Gui:
 
     def pick(self, a):
         name = a["author"] if isinstance(a, dict) else a
+        c.log(f"pick author {name}")
         c.call("/state", "PUT", {"author": name}, token=self.token)
         self.author = name
         self.books = self.list_books(name)
         self.goto("books")
 
     def open_book(self, b):
+        c.log(f"open book {b['id']} ({b['title']})")
         c.call("/state", "PUT", {"book": b["id"], "author": self.author}, token=self.token)
         self.book = b
         self.idx = 0

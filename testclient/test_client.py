@@ -9,6 +9,7 @@ It writes playback state to the server, so use a book you do not mind touching. 
 local server: everything goes to SIDECAR_URL.
 """
 import json
+import sys
 import os
 import time
 import urllib.error
@@ -39,6 +40,14 @@ TOKEN = os.environ.get("TEST_TOKEN", "")
 RESULTS = []
 
 
+DEBUG = bool(os.environ.get("DEBUG")) or "--debug" in sys.argv
+
+
+def log(*a):
+    if DEBUG:
+        print("[client]", *a, flush=True)
+
+
 def check(name, ok, detail=""):
     RESULTS.append((name, ok, detail))
     print(("ok   " if ok else "FAIL ") + name + (" - " + detail if detail else ""))
@@ -54,6 +63,9 @@ def call(path, method="GET", body=None, token=None, query=None, stream=False):
     if tok and not stream:
         req.add_header("authorization", "Bearer " + tok)
     data = json.dumps(body).encode() if body is not None else None
+    # the stream path carries the token in the query, so keep it out of the log
+    shown = urllib.parse.urlencode({k: ("***" if k == "token" else v) for k, v in params.items()})
+    log(f"{method} {u.split('?')[0]}" + (f"?{shown}" if shown else "") + (f"  {data.decode()}" if data else ""))
     t0 = time.perf_counter()
     try:
         r = urllib.request.urlopen(req, data, timeout=TIMEOUT)
@@ -64,6 +76,7 @@ def call(path, method="GET", body=None, token=None, query=None, stream=False):
             body = json.loads(raw)
         except (json.JSONDecodeError, UnicodeDecodeError):
             body = raw[:200].decode("utf-8", "replace")
+        log(f"  {e.code} {body}")
         return e.code, 0, body, first, first
     with r:
         length = int(r.headers.get("content-length") or 0)
@@ -77,6 +90,7 @@ def call(path, method="GET", body=None, token=None, query=None, stream=False):
         first = time.perf_counter() - t0
     total = time.perf_counter() - t0
     ctype = (r.headers.get("content-type") or "").split(";")[0]
+    log(f"  {r.status} {len(got)} B (content-length {length}, first byte {first * 1000:.0f} ms) {ctype}")
     return r.status, length, (json.loads(got) if ctype == "application/json" else got), first, total
 
 
@@ -97,7 +111,9 @@ def cached_token():
         return ""
     d = json.load(open(f))
     exp = datetime.fromisoformat(str(d.get("expires", "")).replace("Z", "+00:00"))
-    return d.get("token", "") if exp > datetime.now(timezone.utc) else ""
+    tok = d.get("token", "") if exp > datetime.now(timezone.utc) else ""
+    log("token " + ("from cache" if tok else f"expired {exp}, need a login"))
+    return tok
 
 
 def save_token(tok, expires):
