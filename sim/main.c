@@ -1,5 +1,6 @@
 #include <lvgl.h>
 #include <windows.h>
+#include <stdio.h>
 #include "ui.h"
 
 /* Same UI as the sketch, on a 360x360 window, with placeholder rows: no Wi-Fi, no sidecar,
@@ -29,9 +30,34 @@ static void on_button(lv_event_t *e) {
   ui_set_focus(page == 1 ? booksPage : authorsPage);
 }
 
-int main(void) {
+/* Can't see the window from here, so --dump writes the framebuffer as a BMP for pixel analysis. */
+static void dump_bmp(lv_display_t * disp, const char * path)
+{
+  lv_draw_buf_t * buf = lv_display_get_buf_active(disp);   // LV_COLOR_DEPTH 16
+  const unsigned char * px = (const unsigned char *) (buf ? buf->data : 0);   // BGRX
+  int w = lv_display_get_horizontal_resolution(disp), h = lv_display_get_vertical_resolution(disp);
+  if (!px || w <= 0 || h <= 0) return;
+  FILE * f = fopen(path, "wb");
+  if (!f) return;
+  int size = 54 + w * h * 3;
+  unsigned char hdr[54] = {0};
+  hdr[0] = 'B'; hdr[1] = 'M';
+  hdr[2] = size & 0xFF; hdr[3] = (size >> 8) & 0xFF; hdr[4] = (size >> 16) & 0xFF;
+  hdr[10] = 54; hdr[12] = 40;
+  hdr[20] = w & 0xFF; hdr[21] = (w >> 8) & 0xFF; hdr[22] = (w >> 16) & 0xFF;
+  hdr[24] = -1; hdr[25] = -1; hdr[26] = -1; hdr[27] = -1;   // negative height = top-down
+  hdr[32] = 24;
+  fwrite(hdr, 1, 54, f);
+  for (int i = 0; i < w * h; i++) {
+    fwrite(px + i * 4, 1, 3, f);                       // BGR straight out of the DIB
+  }
+  fclose(f);
+}
+
+int main(int argc, char ** argv) {
+  int dump = (argc > 1 && strcmp(argv[1], "--dump") == 0);
   lv_init();
-  lv_display_t *disp = lv_windows_create_display(L"espaudiobook 360x360", 360, 360, 2, true, true);
+  lv_display_t *disp = lv_windows_create_display(L"espaudiobook 360x360", 360, 360, 100, true, true);
   lv_windows_acquire_pointer_indev(disp);
 
   static const char *authors[] = {"Erin Hunter (121)", "Ann Leckie (9)", "Lois McMaster Bujold (13)", 0};
@@ -44,10 +70,14 @@ int main(void) {
   lv_label_set_text(timeLbl, "14:20 / 41:05");
   lv_bar_set_value(bar, 35, LV_ANIM_OFF);
   ui_set_focus(authorsPage);
+  lv_unlock();
 
+  int ticks = 0;
   while (1) {
     lv_timer_handler();
-    Sleep(5);
+    lv_refr_now(disp);          /* shortcut: lv_timer_handler() alone never refreshed here */
+    if (dump && (++ticks % 20) == 0) dump_bmp(disp, "frame.bmp");
+    Sleep(60);
   }
   return 0;
 }
