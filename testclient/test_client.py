@@ -64,7 +64,7 @@ def call(path, method="GET", body=None, token=None, query=None, stream=False):
         req.add_header("authorization", "Bearer " + tok)
     data = json.dumps(body).encode() if body is not None else None
     # the stream path carries the token in the query, so keep it out of the log
-    shown = urllib.parse.urlencode({k: ("***" if k == "token" else v) for k, v in params.items()})
+    shown = "&".join(k + "=" + ("***" if k == "token" else str(v)) for k, v in params.items())
     log(f"{method} {u.split('?')[0]}" + (f"?{shown}" if shown else "") + (f"  {data.decode()}" if data else ""))
     t0 = time.perf_counter()
     try:
