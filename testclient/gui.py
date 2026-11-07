@@ -171,19 +171,24 @@ class Gui:
                {"assetId": self.chapters[self.idx]["assetId"], "positionMs": self.pos_ms}, token=self.token)
 
     def fetch(self):
-        st, _, state, _, _ = c.call("/state", token=self.token)
-        self.state = state
-        self.author = (state or {}).get("author") or None
-        st, _, books, _, _ = c.call("/books", token=self.token)
-        if st != 200:
-            raise SystemExit(f"books failed: {st} {books}")
-        self.books = [b for b in books if b["author"] == self.author] if self.author else books
-        st, _, self.authors, _, _ = c.call("/authors", token=self.token)
-        cur = (state or {}).get("book")
-        self.book = next((b for b in self.books if str(b["id"]) == str(cur)), None)
+        self.state = c.call("/state", token=self.token)[2]
+        self.author = (self.state or {}).get("author") or None
+        cached = c.call("/books", token=self.token)[2]
+        lib = c.call("/library", token=self.token)[2] or c.call("/books", token=self.token)[2]
+        cached = cached if isinstance(cached, list) else []
+        lib = lib if isinstance(lib, list) else []
+        rows = cached or lib            # the cache is the list; an empty cache still shows the catalog
+        counts = {}
+        for b in rows:
+            a = (b.get("authors") or ["(unknown)"])[0]
+            counts[a] = counts.get(a, 0) + 1
+        self.authors = [{"author": a, "books": counts[a]} for a in sorted(counts)]
+        self.books = [b for b in rows if not self.author or (b.get("authors") or ["(unknown)"])[0] == self.author]
+        cur = (self.state or {}).get("book")
+        self.book = next((b for b in rows if str(b["id"]) == str(cur)), None)
         if self.book:
             st, _, man, _, _ = c.call(f"/books/{self.book['id']}", token=self.token)
-            self.chapters = man.get("chapters", [])
+            self.chapters = man.get("chapters", []) if isinstance(man, dict) else []
             self.pos_ms = 0
 
     def pick(self, name):
