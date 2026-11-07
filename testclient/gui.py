@@ -92,7 +92,7 @@ class Gui:
             return
         x, y = SIZE // 2 + dx, R + dy
         item = self.cv.create_rectangle(x - 30, y - 15, x + 30, y + 15, fill="#223", outline="#668", tags="ui")
-        self.cv.create_text(item, y, text=self.clip(label, 60), fill="#cde", font=("TkDefaultFont", 12), tags="ui")
+        self.cv.create_text(x, y, text=self.clip(label, 60), fill="#cde", font=("TkDefaultFont", 12), tags="ui")
         self.cv.tag_bind(item, "<Button-1>", action)
 
     def page(self, items, open_item):
