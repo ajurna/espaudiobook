@@ -11,3 +11,6 @@ byj/
 sim/objects.rsp
 sim/sim.exe
 sim/lvgl/
+*.exe
+*.bmp
+*.png
