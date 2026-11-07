@@ -41,7 +41,7 @@ import uuid
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.error import HTTPError
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, quote, unquote, urlparse
 from urllib.request import Request, urlopen
 
 BASE = os.environ.get("BOOKORBIT_URL", "http://127.0.0.1:3000").rstrip("/")
@@ -89,6 +89,28 @@ def library(bearer):
             "seriesName": b.get("seriesName")}  # the client groups books by this
             for b in items
             if any((f.get("format") or "").lower() in AUDIO_FORMATS for f in b.get("files", []))]
+
+
+def author_id(name, bearer):
+    hits = api(f"authors?q={quote(str(name))}&size=5", bearer=bearer).get("items", [])
+    return next((a["id"] for a in hits if (a.get("name") or "").lower() == str(name).lower()),
+                hits[0]["id"] if hits else None)
+
+
+def by_author(name, bearer):
+    # mirrors BookOrbit's own GET /authors/{id}/books; the client only knows author names
+    aid = author_id(name, bearer)
+    if aid is None:
+        return []
+    ids = {str(r[0]) for r in connect().execute("select distinct book_id from tracks")}
+    out = []
+    for b in api(f"authors/{aid}/books?size=100", bearer=bearer).get("items", []):
+        if not any((f.get("format") or "").lower() in AUDIO_FORMATS for f in b.get("files", [])):
+            continue
+        out.append({"id": b["id"], "title": b.get("title") or f"book {b['id']}",
+                    "authors": b.get("authors") or [], "seriesName": b.get("seriesName"),
+                    "cached": str(b["id"]) in ids})
+    return out
 
 
 def book_detail(book_id, bearer):
@@ -400,6 +422,8 @@ def main():
                     return self.json(library(b))
                 if parts == ["authors"]:
                     return self.json(cached_authors())
+                if len(parts) == 3 and parts[0] == "authors" and parts[2] == "books":
+                    return self.json(by_author(unquote(parts[1]), b))
                 if parts == ["state"]:
                     return self.json(app_state())
                 if len(parts) == 2 and parts[0] == "books":

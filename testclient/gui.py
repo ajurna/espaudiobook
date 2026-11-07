@@ -13,6 +13,7 @@ import sys
 import tempfile
 import time
 import tkinter as tk
+from urllib.parse import quote
 
 try:
     import miniaudio as ma
@@ -252,6 +253,7 @@ class Gui:
         lib = c.call("/library", token=self.token)[2] or c.call("/books", token=self.token)[2]
         lib = lib if isinstance(lib, list) else []
         self.cached, self.all_books = cached, lib
+        self.rows = self.author_books(self.author)
         ids = {str(b["id"]) for b in cached}
         for b in lib:
             b["cached"] = str(b["id"]) in ids
@@ -274,9 +276,14 @@ class Gui:
 
     SOLO = "Solo books"
 
+    def author_books(self, name):
+        # the sidecar mirrors BookOrbit's own GET /authors/{id}/books; names alone would cap us at one page
+        rows = c.call(f"/authors/{quote(str(name))}/books", token=self.token)[2] if name else []
+        return rows if isinstance(rows, list) else []
+
     def collections_of(self, name):
         cols = {}
-        for b in self.all_books:
+        for b in self.rows or [x for x in self.all_books if author_of(x) == name]:
             if author_of(b) == name:
                 cols.setdefault(b.get("seriesName") or self.SOLO, 0)
                 cols[b.get("seriesName") or self.SOLO] += 1
@@ -284,14 +291,12 @@ class Gui:
                 for k, v in sorted(cols.items(), key=lambda kv: (kv[0] == self.SOLO, kv[0].lower()))]
 
     def list_books(self, name):
-        # base the view on the catalog rows (they carry seriesName), then mark what is cached
-        ids = {str(b["id"]) for b in self.cached}
-        mine = [b for b in self.all_books if author_of(b) == name]
+        mine = [b for b in (self.rows or [x for x in self.all_books if author_of(x) == name])
+                if author_of(b) == name]
         if self.collection:
             mine = [b for b in mine if (b.get("seriesName") or self.SOLO) == self.collection]
         for b in mine:
-            b["cached"] = str(b["id"]) in ids
-            b["label"] = b["title"] + (" *" if b["cached"] else "")   # * = already on the server
+            b["label"] = b["title"] + (" *" if b.get("cached") else "")   # * = already on the server
         return mine
 
     def pick(self, a):
@@ -300,6 +305,7 @@ class Gui:
         c.call("/state", "PUT", {"author": name}, token=self.token)
         self.author = name
         self.collection = None
+        self.rows = self.author_books(name)
         self.collections = self.collections_of(name)
         self.goto("collections")
 
