@@ -42,8 +42,10 @@ class Gui:
             self.cv.pack()
             # the corners are not visible on the real panel - draw the window so you can see the limit
             self.cv.create_oval(0, 0, SIZE, SIZE, fill="#111", outline="#444")
-            self.cv.tag_bind("ui", "<Button-1>", self.onclick)   # bind the tag, not the item: a click on
-            self.actions = {}                                    # the label lands on the text item, not the shape under it
+            # bind the canvas, not the items: a click on a label hits the text item, and item-level
+            # bindings are not reliably delivered - resolve the item under the pointer instead.
+            self.actions = {}
+            self.cv.bind("<Button-1>", self.onclick)
         self.books, self.chapters, self.book = [], [], None
         self.all_books, self.cached = [], []
         self.authors, self.author, self.view, self.state = [], None, "authors", None
@@ -62,7 +64,8 @@ class Gui:
             self.actions[item] = action
 
     def onclick(self, e):
-        a = self.actions.get(getattr(e, "id", None))
+        hit = self.cv.find_closest(e.x, e.y)          # item under the pointer (the label is on top)
+        a = self.actions.get(hit[0]) if hit else None
         if a:
             a(e)
 
