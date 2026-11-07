@@ -24,7 +24,7 @@ python3 sidecar/test_sidecar.py      # transcode + cache-hit + frame-aligned see
 Deploy (image = python + ffmpeg only):
 
 ```sh
-cp .env.example .env      # set BOOKORBIT_USER/BOOKORBIT_PASSWORD for an account with audiobook access
+cp .env.example .env      # BOOKORBIT_URL, cache cap; no credentials - the device owns its session
 docker compose up -d --build
 ```
 
@@ -41,6 +41,17 @@ docker build -t espaudiobook-sidecar sidecar
 mkdir -p data/sidecar
 docker run --rm -p 8090:8090 -e BOOKORBIT_URL=http://127.0.0.1:3000 -e BOOKORBIT_TOKEN=... \
   -v "$PWD/data/sidecar:/cache" espaudiobook-sidecar
+```
+
+Push to DockerHub. The version lives only in `sidecar/pyproject.toml` (locked with `uv lock`), and
+`/healthz` reports it so you can tell which image is running:
+
+```sh
+V=$(python -c "import tomllib;print(tomllib.load(open('sidecar/pyproject.toml','rb'))['project']['version'])")
+docker build -t ajurna/espaudiobook-sidecar:$V sidecar
+docker push ajurna/espaudiobook-sidecar:$V
+docker tag ajurna/espaudiobook-sidecar:$V ajurna/espaudiobook-sidecar:latest
+docker push ajurna/espaudiobook-sidecar:latest
 ```
 
 The ESP32 points at `http://<host>:8090`. Cache lives in `./data/sidecar` (the container is read-only,

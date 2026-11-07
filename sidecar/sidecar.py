@@ -33,6 +33,7 @@ import json
 import os
 import shutil
 import subprocess
+import tomllib
 import uuid
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -43,6 +44,12 @@ from urllib.request import Request, urlopen
 BASE = os.environ.get("BOOKORBIT_URL", "http://127.0.0.1:3000").rstrip("/")
 CACHE_DIR = os.environ.get("CACHE_DIR", "cache")
 PORT = int(os.environ.get("PORT", "8090"))
+
+
+def version():
+    # pyproject.toml is the single source of the version (uv reads it for the lockfile)
+    p = os.path.join(os.path.dirname(os.path.abspath(__file__)), "pyproject.toml")
+    return tomllib.load(open(p, "rb"))["project"]["version"] if os.path.exists(p) else ""
 
 SAMPLE_RATE = 48000
 BITRATE_K = 48
@@ -246,7 +253,7 @@ def main():
             parts = [p for p in u.path.split("/") if p]
             try:
                 if parts == ["healthz"]:
-                    return self.json({"ok": True, "ffmpeg": bool(shutil.which("ffmpeg"))})
+                    return self.json({"ok": True, "ffmpeg": bool(shutil.which("ffmpeg")), "version": version()})
                 b = self.bearer()
                 if not b:
                     return self.json({"error": "no token"}, 401)

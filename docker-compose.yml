@@ -10,7 +10,7 @@ name: espaudiobook
 services:
   sidecar:
     build: ./sidecar
-    image: espaudiobook-sidecar
+    image: ajurna/espaudiobook-sidecar
     container_name: espaudiobook-sidecar
     restart: unless-stopped
     init: true
