@@ -329,10 +329,22 @@ lv_obj_t* makeButton(lv_obj_t* parent, const char* text, int what) {
   lv_obj_t* b = lv_button_create(parent);
   lv_obj_set_size(b, 64, 64);
   lv_obj_t* l = lv_label_create(b);
+  lv_label_set_long_mode(l, LV_LABEL_LONG_CLIP);   // words stay inside the button, not past the circle
+  lv_obj_set_width(l, 60);
   lv_label_set_text(l, text);
   lv_obj_center(l);
   lv_obj_add_event_cb(b, onButton, LV_EVENT_CLICKED, (void*)(intptr_t)what);
   return b;
+}
+
+// the narrowest chord in the row band (y=40..160) is 212 px, so a row that fits at the top fits everywhere
+void lockToRow(lv_obj_t* row) {
+  lv_obj_set_width(row, 210);
+  lv_obj_t* l = lv_obj_get_child(row, 0);
+  if (lv_obj_check_type(l, &lv_label_class)) {
+    lv_label_set_long_mode(l, LV_LABEL_LONG_CLIP);
+    lv_obj_set_width(l, 200);
+  }
 }
 
 void buildUi() {
@@ -386,6 +398,7 @@ void fillBookList() {
     String id = b["id"].as<String>();
     bookIds.push_back(id);
     lv_obj_t* row = lv_list_add_button(booksPage, NULL, b["title"].as<const char*>());
+    lockToRow(row);
     lv_obj_add_event_cb(row, onBook, LV_EVENT_CLICKED, strdup(id.c_str()));
   }
   cursor = 0;
@@ -403,6 +416,7 @@ void fillAuthorList() {
     String name = a["author"].as<String>();
     authorNames.push_back(name);
     lv_obj_t* row = lv_list_add_button(authorsPage, NULL, (name + " (" + String(a["books"].as<int>()) + ")").c_str());
+    lockToRow(row);
     lv_obj_add_event_cb(row, onAuthor, LV_EVENT_CLICKED, strdup(name.c_str()));
   }
   cursor = 0;

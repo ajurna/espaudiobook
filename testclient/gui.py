@@ -13,6 +13,7 @@ import sys
 import tempfile
 import time
 import tkinter as tk
+from tkinter import font
 
 import miniaudio as ma
 import test_client as c
@@ -54,6 +55,16 @@ class Gui:
         self.started = 0.0
         self.token = c.cached_token() or self.login()
         self.status = ""
+        self.fonts = {}
+
+    def clip(self, s, w, size=12):
+        """Truncate to what actually fits, measured - not a char-count guess."""
+        if not self.root:
+            return s[:int(w / size)]
+        f = self.fonts.setdefault(size, font.Font(family="TkDefaultFont", size=size))
+        while s and f.getlength(s) > w:
+            s = s[:-1]
+        return s
 
     def login(self):
         st, _, body, _, _ = c.call("/auth/login", "POST",
@@ -67,7 +78,7 @@ class Gui:
     def text(self, y, s, size=14, color="#ddd"):
         if not self.root:
             return
-        self.cv.create_text(SIZE // 2, y, text=s[:int(row_width(y)) // size], fill=color,
+        self.cv.create_text(SIZE // 2, y, text=self.clip(s, row_width(y), size), fill=color,
                             font=("TkDefaultFont", size))
 
     def button(self, label, action, dx=0, dy=0):
@@ -79,7 +90,7 @@ class Gui:
             return
         x, y = SIZE // 2 + dx, R + dy
         item = self.cv.create_rectangle(x - 30, y - 15, x + 30, y + 15, fill="#223", outline="#668", tags="ui")
-        self.cv.create_text(item, y, text=label, fill="#cde", font=("TkDefaultFont", 12), tags="ui")
+        self.cv.create_text(item, y, text=self.clip(label, 60), fill="#cde", font=("TkDefaultFont", 12), tags="ui")
         self.cv.tag_bind(item, "<Button-1>", action)
 
     def page(self, items, open_item):
@@ -92,7 +103,7 @@ class Gui:
             if w < 120:
                 break
             label = items[n].get("author") or items[n].get("title") or str(items[n])
-            item = self.cv.create_text(SIZE // 2, ROW_TOP + i * ROW_STEP, text=label[:int(w / 12)],
+            item = self.cv.create_text(SIZE // 2, ROW_TOP + i * ROW_STEP, text=self.clip(label, w),
                                        fill="#8cf" if n == self.cursor else "#ddd", font=("TkDefaultFont", 12),
                                        tags="ui")
             if self.root:
