@@ -26,6 +26,14 @@ for the stream, the 3-chapter prefetch burst, cold vs warm first byte). Put your
 `testclient/.env` (SIDECAR_URL, BOOKORBIT_USER/BOOKORBIT_PASSWORD, or TEST_TOKEN) — it writes playback
 state to whatever server you point it at, so pick a book you do not mind touching.
 
+### Screen layout and controls
+
+Same control set in the test client and the firmware: `up`, `go`, `down`, `back`. On a list they move the
+highlighted row and open it; on the player up/down are prev/next chapter and go is play/pause. Rows are
+drawn clipped to the circle at their own height and live above the buttons, so a row can never sit under
+one — rows at y=40..160 (6 per page, chord 212-320 px), buttons 64 px at y=200 (chord 310), 270 (232),
+300 (155). `python testclient/gui.py --nav` walks authors -> book -> chapter -> back without a window.
+
 Deploy (image = python + ffmpeg only):
 
 ```sh
