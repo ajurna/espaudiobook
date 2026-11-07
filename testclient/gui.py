@@ -14,7 +14,10 @@ import tempfile
 import time
 import tkinter as tk
 
-import miniaudio as ma
+try:
+    import miniaudio as ma
+except ImportError:            # --nav/--check are headless, audio is optional
+    ma = None
 import test_client as c
 
 SIZE = 320
@@ -134,6 +137,10 @@ class Gui:
         if self.view == "authors":
             self.page(self.authors, self.pick)
             self.cv.create_text(SIZE // 2, 20, text="authors", fill="#888", font=("TkDefaultFont", 12), tags="ui")
+        elif self.view == "collections":
+            self.page(self.collections, self.pick_collection)
+            self.text(20, self.author, 12, "#888")
+            self.cv.create_text(SIZE // 2, 20, text="authors", fill="#888", font=("TkDefaultFont", 12), tags="ui")
         elif self.view == "books":
             self.page(self.books, self.open_book)
             self.cv.create_text(SIZE // 2, 20, text="books", fill="#888", font=("TkDefaultFont", 12), tags="ui")
@@ -150,6 +157,9 @@ class Gui:
         for label, dx, dy in (("up", -100, 40), ("down", 100, 40), ("go", 0, 110), ("back", 0, 140)):
             self.button(label, lambda e, l=label: self.act(l), dx, dy)
 
+    def list_of_view(self):
+        return {"authors": self.authors, "collections": self.collections, "books": self.books}.get(self.view, [])
+
     def act(self, what):
         c.log(f"{what} -> view {self.view} cursor {self.cursor}")
         if what == "back":
@@ -159,21 +169,23 @@ class Gui:
             elif self.view == "books" and self.book in self.books:
                 self.cursor = self.books.index(self.book)     # back lands on the book you came from
             else:
-                self.cursor = min(self.cursor, max(0, len(self.books) - 1))
+                items = self.list_of_view()
+                self.cursor = min(self.cursor, max(0, len(items) - 1))
         elif what in ("up", "down"):
             if self.view == "player":
                 self.act("prev" if what == "up" else "next")
                 return
-            items = self.authors if self.view == "authors" else self.books
+            items = self.list_of_view()
             if items:
                 self.cursor = max(0, min(len(items) - 1, self.cursor + (-1 if what == "up" else 1)))
         elif what == "go":
             if self.view == "player":
                 self.act("play")
                 return
-            items = self.authors if self.view == "authors" else self.books
+            items = self.list_of_view()
             if items:
-                (self.pick if self.view == "authors" else self.open_book)(items[self.cursor])
+                self.cursor = min(self.cursor, len(items) - 1)   # lists shrink when you change collection
+                {"authors": self.pick, "collections": self.pick_collection, "books": self.open_book}[self.view](items[self.cursor])
                 return
         elif what == "play":
             self.playing = not self.playing
@@ -240,6 +252,9 @@ class Gui:
         lib = c.call("/library", token=self.token)[2] or c.call("/books", token=self.token)[2]
         lib = lib if isinstance(lib, list) else []
         self.cached, self.all_books = cached, lib
+        ids = {str(b["id"]) for b in cached}
+        for b in lib:
+            b["cached"] = str(b["id"]) in ids
         counts = {}
         for b in lib:
             counts.setdefault(author_of(b), {"books": 0, "cached": 0})["books"] += 1
@@ -247,6 +262,8 @@ class Gui:
             counts.setdefault(author_of(b), {"books": 0, "cached": 0})["cached"] += 1
         self.authors = [{"author": a, "books": v["books"], "cached": v["cached"],
                          "label": f"{a} ({v['cached']}/{v['books']})"} for a, v in sorted(counts.items())]
+        self.collection = None
+        self.collections = self.collections_of(self.author)
         self.books = self.list_books(self.author)
         cur = (self.state or {}).get("book")
         self.book = next((b for b in self.all_books if str(b["id"]) == str(cur)), None)
@@ -255,10 +272,23 @@ class Gui:
             self.chapters = man.get("chapters", []) if isinstance(man, dict) else []
             self.pos_ms = 0
 
+    SOLO = "Solo books"
+
+    def collections_of(self, name):
+        cols = {}
+        for b in self.all_books:
+            if author_of(b) == name:
+                cols.setdefault(b.get("seriesName") or self.SOLO, 0)
+                cols[b.get("seriesName") or self.SOLO] += 1
+        return [{"name": k, "count": v, "label": f"{k} ({v})"}
+                for k, v in sorted(cols.items(), key=lambda kv: (kv[0] == self.SOLO, kv[0].lower()))]
+
     def list_books(self, name):
         mine = [b for b in self.cached if author_of(b) == name] or [b for b in self.all_books if author_of(b) == name]
+        if self.collection:
+            mine = [b for b in mine if (b.get("seriesName") or self.SOLO) == self.collection]
         for b in mine:
-            b["label"] = b["title"]
+            b["label"] = b["title"] + (" *" if b.get("cached") else "")   # * = already on the server
         return mine
 
     def pick(self, a):
@@ -266,7 +296,14 @@ class Gui:
         c.log(f"pick author {name}")
         c.call("/state", "PUT", {"author": name}, token=self.token)
         self.author = name
-        self.books = self.list_books(name)
+        self.collection = None
+        self.collections = self.collections_of(name)
+        self.goto("collections")
+
+    def pick_collection(self, row):
+        c.log(f"pick collection {row['name']}")
+        self.collection = row["name"]
+        self.books = self.list_books(self.author)
         self.goto("books")
 
     def open_book(self, b):
@@ -290,9 +327,9 @@ class Gui:
         self.fetch()
         for what in ("down", "go", "down", "go", "next", "go", "back", "back"):
             self.act(what)
-            items = self.authors if self.view == "authors" else (self.books if self.view == "books" else self.chapters)
+            items = self.list_of_view() or self.chapters
             cur = items[self.cursor] if items and self.cursor < len(items) else None
-            name = (cur.get("author") or cur.get("title")) if cur else "-"
+            name = (cur.get("author") or cur.get("name") or cur.get("title")) if cur else "-"
             print(f"  {what:<5} {self.view:<8} {name} {self.status}")
             self.status = ""
 
@@ -303,7 +340,10 @@ class Gui:
             print(f"  y={y:<4} widest row {w:5.0f} px" + ("   <- a 300 px row is clipped" if w < 300 else ""))
         self.fetch()
         print(f"\nauthors: {len(self.authors)}, books cached for this author: {len(self.books)}")
+        print("collections: " + ", ".join(c_["label"] for c_ in self.collections))
         print(f"state: author {self.state and self.state['author']!r}, book {self.state and self.state['book']!r}")
+        if not self.book:
+            return
         print(f"\nbook {self.book['id']} ({self.book['title']}), {len(self.chapters)} chapters")
         st, length, body, first, total = c.call(f"/track/{self.book['id']}/{self.chapters[0]['assetId']}",
                                                 stream=True, token=self.token, query={"chapter": 0})
