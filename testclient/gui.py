@@ -42,6 +42,8 @@ class Gui:
             self.cv.pack()
             # the corners are not visible on the real panel - draw the window so you can see the limit
             self.cv.create_oval(0, 0, SIZE, SIZE, fill="#111", outline="#444")
+            self.cv.tag_bind("ui", "<Button-1>", self.onclick)   # bind the tag, not the item: a click on
+            self.actions = {}                                    # the label lands on the text item, not the shape under it
         self.books, self.chapters, self.book = [], [], None
         self.all_books, self.cached = [], []
         self.authors, self.author, self.view, self.state = [], None, "authors", None
@@ -54,6 +56,15 @@ class Gui:
         self.started = 0.0
         self.token = c.cached_token() or self.login()
         self.status = ""
+
+    def hit(self, item, action):
+        if self.root:
+            self.actions[item] = action
+
+    def onclick(self, e):
+        a = self.actions.get(getattr(e, "id", None))
+        if a:
+            a(e)
 
     def clip(self, s, w, size=12):
         """Truncate to what actually fits, measured with the canvas - tkinter's Font has no getlength."""
@@ -92,8 +103,9 @@ class Gui:
             return
         x, y = SIZE // 2 + dx, R + dy
         item = self.cv.create_rectangle(x - 30, y - 15, x + 30, y + 15, fill="#223", outline="#668", tags="ui")
-        self.cv.create_text(x, y, text=self.clip(label, 60), fill="#cde", font=("TkDefaultFont", 12), tags="ui")
-        self.cv.tag_bind(item, "<Button-1>", action)
+        txt = self.cv.create_text(x, y, text=self.clip(label, 60), fill="#cde", font=("TkDefaultFont", 12), tags="ui")
+        self.hit(item, action)
+        self.hit(txt, action)
 
     def page(self, items, open_item):
         base = (self.cursor // ROWS) * ROWS
@@ -108,13 +120,13 @@ class Gui:
             item = self.cv.create_text(SIZE // 2, ROW_TOP + i * ROW_STEP, text=self.clip(label, w),
                                        fill="#8cf" if n == self.cursor else "#ddd", font=("TkDefaultFont", 12),
                                        tags="ui")
-            if self.root:
-                self.cv.tag_bind(item, "<Button-1>", lambda e, k=n: (setattr(self, "cursor", k), open_item(items[k])))
+            self.hit(item, lambda e, k=n: (setattr(self, "cursor", k), open_item(items[k])))
 
     def draw(self):
         if not self.root:
             return
         self.cv.delete("ui")
+        self.actions.clear()            # every ui item is recreated each draw
         self.status = ""
         if self.view == "authors":
             self.page(self.authors, self.pick)
