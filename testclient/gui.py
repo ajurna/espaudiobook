@@ -13,7 +13,6 @@ import sys
 import tempfile
 import time
 import tkinter as tk
-from tkinter import font
 
 import miniaudio as ma
 import test_client as c
@@ -55,15 +54,18 @@ class Gui:
         self.started = 0.0
         self.token = c.cached_token() or self.login()
         self.status = ""
-        self.fonts = {}
 
     def clip(self, s, w, size=12):
-        """Truncate to what actually fits, measured - not a char-count guess."""
+        """Truncate to what actually fits, measured with the canvas - tkinter's Font has no getlength."""
         if not self.root:
             return s[:int(w / size)]
-        f = self.fonts.setdefault(size, font.Font(family="TkDefaultFont", size=size))
-        while s and f.getlength(s) > w:
+        item = self.cv.create_text(SIZE // 2, R, text=s, font=("TkDefaultFont", size), tags="measure")
+        b = self.cv.bbox(item)
+        while b and b[2] - b[0] > w and s:
             s = s[:-1]
+            self.cv.itemconfig(item, text=s)
+            b = self.cv.bbox(item)
+        self.cv.delete(item)
         return s
 
     def login(self):
