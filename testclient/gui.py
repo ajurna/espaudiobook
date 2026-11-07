@@ -99,7 +99,7 @@ class Gui:
         if not self.root:
             return
         self.cv.create_text(SIZE // 2, y, text=self.clip(s, row_width(y), size), fill=color,
-                            font=("TkDefaultFont", size))
+                            font=("TkDefaultFont", size), tags="ui")   # tags="ui": draw() deletes "ui" each redraw
 
     def button(self, label, action, dx=0, dy=0):
         if not self.root:
@@ -140,8 +140,8 @@ class Gui:
             self.cv.create_text(SIZE // 2, 20, text="authors", fill="#888", font=("TkDefaultFont", 12), tags="ui")
         elif self.view == "collections":
             self.page(self.collections, self.pick_collection)
-            self.text(20, self.author, 12, "#888")
-            self.cv.create_text(SIZE // 2, 20, text="authors", fill="#888", font=("TkDefaultFont", 12), tags="ui")
+            self.text(20, "collections", 12, "#888")   # was "authors": the header kept the previous view's title
+            self.text(44, self.author, 12, "#8cf")     # breadcrumb, below the header instead of on top of it
         elif self.view == "books":
             self.page(self.books, self.open_book)
             self.cv.create_text(SIZE // 2, 20, text="books", fill="#888", font=("TkDefaultFont", 12), tags="ui")
