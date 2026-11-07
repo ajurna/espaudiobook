@@ -53,6 +53,7 @@ class Gui:
         self.books, self.chapters, self.book = [], [], None
         self.all_books, self.cached = [], []
         self.authors, self.author, self.view, self.state = [], None, "authors", None
+        self.collection, self.collections = None, []
         self.cursor, self.stack = 0, []
         self.idx = 0                       # chapter being played
         self.pos_ms = 0
@@ -338,6 +339,25 @@ class Gui:
             print(f"  {what:<5} {self.view:<8} {name} {self.status}")
             self.status = ""
 
+    def flow(self, author="Erin Hunter"):
+        """pick author -> collections -> pick a collection -> books -> pick a book -> state"""
+        a = [x for x in self.authors if x["author"] == author] or self.authors
+        if not a:
+            print("flow: no authors"); return
+        self.pick(a[0])
+        named = [x for x in self.collections if x["name"] != self.SOLO]
+        print(f"flow: author {self.author}, {len(self.collections)} collections")
+        if not named:
+            print("  no collections (only Solo books)"); return
+        self.pick_collection(named[0])
+        print(f"  {self.collection}: {len(self.books)} books")
+        if not self.books:
+            print("  books view is empty"); return
+        self.open_book(self.books[0])
+        print(f"  {self.book['title']} [{self.book.get('seriesName')}] -> {len(self.chapters)} chapters")
+        self.report()
+        print(f"  state: {c.call('/state', token=self.token)[2]}")
+
     def check(self):
         print(f"circle radius {R} px (320x320 panel), firmware row is 300 px, buttons 64 px")
         for y in (40, 90, 120, 190, 230, 270, 300, 316):
@@ -347,6 +367,7 @@ class Gui:
         print(f"\nauthors: {len(self.authors)}, books cached for this author: {len(self.books)}")
         print("collections: " + ", ".join(c_["label"] for c_ in self.collections))
         print(f"state: author {self.state and self.state['author']!r}, book {self.state and self.state['book']!r}")
+        self.flow()
         if not self.book:
             return
         print(f"\nbook {self.book['id']} ({self.book['title']}), {len(self.chapters)} chapters")

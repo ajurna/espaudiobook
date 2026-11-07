@@ -7,3 +7,7 @@ certs/
 __pycache__/
 .idea/
 testclient/.token
+byj/
+sim/objects.rsp
+sim/sim.exe
+sim/lvgl/
