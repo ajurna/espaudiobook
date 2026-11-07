@@ -43,7 +43,7 @@ class Gui:
             # the corners are not visible on the real panel - draw the window so you can see the limit
             self.cv.create_oval(0, 0, SIZE, SIZE, fill="#111", outline="#444")
         self.books, self.chapters, self.book = [], [], None
-        self.all_books = []
+        self.all_books, self.cached = [], []
         self.authors, self.author, self.view, self.state = [], None, "authors", None
         self.cursor, self.stack = 0, []
         self.idx = 0                       # chapter being played
@@ -104,7 +104,7 @@ class Gui:
             w = row_width(ROW_TOP + i * ROW_STEP)
             if w < 120:
                 break
-            label = items[n].get("author") or items[n].get("title") or str(items[n])
+            label = items[n].get("label") or items[n].get("author") or items[n].get("title") or str(items[n])
             item = self.cv.create_text(SIZE // 2, ROW_TOP + i * ROW_STEP, text=self.clip(label, w),
                                        fill="#8cf" if n == self.cursor else "#ddd", font=("TkDefaultFont", 12),
                                        tags="ui")
@@ -140,6 +140,10 @@ class Gui:
             self.view = self.stack.pop() if self.stack else "authors"
             if self.view == "authors":
                 self.book = None
+            elif self.view == "books" and self.book in self.books:
+                self.cursor = self.books.index(self.book)     # back lands on the book you came from
+            else:
+                self.cursor = min(self.cursor, max(0, len(self.books) - 1))
         elif what in ("up", "down"):
             if self.view == "player":
                 self.act("prev" if what == "up" else "next")
@@ -214,29 +218,36 @@ class Gui:
         self.state = c.call("/state", token=self.token)[2]
         self.author = (self.state or {}).get("author") or None
         cached = c.call("/books", token=self.token)[2]
-        lib = c.call("/library", token=self.token)[2] or c.call("/books", token=self.token)[2]
         cached = cached if isinstance(cached, list) else []
+        lib = c.call("/library", token=self.token)[2] or c.call("/books", token=self.token)[2]
         lib = lib if isinstance(lib, list) else []
-        rows = cached or lib            # the cache is the list; an empty cache still shows the catalog
+        self.cached, self.all_books = cached, lib
         counts = {}
-        for b in rows:
-            a = author_of(b)
-            counts[a] = counts.get(a, 0) + 1
-        self.authors = [{"author": a, "books": counts[a]} for a in sorted(counts)]
-        self.books = [b for b in rows if not self.author or author_of(b) == self.author]
-        self.all_books = rows
+        for b in lib:
+            counts.setdefault(author_of(b), {"books": 0, "cached": 0})["books"] += 1
+        for b in cached:
+            counts.setdefault(author_of(b), {"books": 0, "cached": 0})["cached"] += 1
+        self.authors = [{"author": a, "books": v["books"], "cached": v["cached"],
+                         "label": f"{a} ({v['cached']}/{v['books']})"} for a, v in sorted(counts.items())]
+        self.books = self.list_books(self.author)
         cur = (self.state or {}).get("book")
-        self.book = next((b for b in rows if str(b["id"]) == str(cur)), None)
+        self.book = next((b for b in self.all_books if str(b["id"]) == str(cur)), None)
         if self.book:
             st, _, man, _, _ = c.call(f"/books/{self.book['id']}", token=self.token)
             self.chapters = man.get("chapters", []) if isinstance(man, dict) else []
             self.pos_ms = 0
 
+    def list_books(self, name):
+        mine = [b for b in self.cached if author_of(b) == name] or [b for b in self.all_books if author_of(b) == name]
+        for b in mine:
+            b["label"] = b["title"]
+        return mine
+
     def pick(self, a):
-        name = a["author"]
+        name = a["author"] if isinstance(a, dict) else a
         c.call("/state", "PUT", {"author": name}, token=self.token)
         self.author = name
-        self.books = [b for b in self.all_books if author_of(b) == name]
+        self.books = self.list_books(name)
         self.goto("books")
 
     def open_book(self, b):
