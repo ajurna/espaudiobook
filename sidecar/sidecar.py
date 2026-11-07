@@ -97,20 +97,22 @@ def author_id(name, bearer):
                 hits[0]["id"] if hits else None)
 
 
-def by_author(name, bearer):
-    # mirrors BookOrbit's own GET /authors/{id}/books; the client only knows author names
+def by_author(name, bearer, size=100):
+    # mirrors BookOrbit's own GET /authors/{id}/books; size is capped at 100 per page server-side
     aid = author_id(name, bearer)
     if aid is None:
         return []
     ids = {str(r[0]) for r in connect().execute("select distinct book_id from tracks")}
-    out = []
-    for b in api(f"authors/{aid}/books?size=100", bearer=bearer).get("items", []):
-        if not any((f.get("format") or "").lower() in AUDIO_FORMATS for f in b.get("files", [])):
-            continue
-        out.append({"id": b["id"], "title": b.get("title") or f"book {b['id']}",
-                    "authors": b.get("authors") or [], "seriesName": b.get("seriesName"),
-                    "cached": str(b["id"]) in ids})
-    return out
+    out, page = [], 0
+    while True:
+        items = api(f"authors/{aid}/books?page={page}&size={size}", bearer=bearer).get("items", []) or []
+        out += [{"id": b["id"], "title": b.get("title") or f"book {b['id']}",
+                 "authors": b.get("authors") or [], "seriesName": b.get("seriesName"),
+                 "cached": str(b["id"]) in ids}
+                for b in items if any((f.get("format") or "").lower() in AUDIO_FORMATS for f in b.get("files", []))]
+        if len(items) < size:
+            return out
+        page += 1
 
 
 def book_detail(book_id, bearer):
