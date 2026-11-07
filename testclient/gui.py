@@ -187,7 +187,7 @@ class Gui:
             if items:
                 self.cursor = min(self.cursor, len(items) - 1)   # lists shrink when you change collection
                 {"authors": self.pick, "collections": self.pick_collection, "books": self.open_book}[self.view](items[self.cursor])
-                return
+                # no return here: the window needs the draw() at the end of act() to show the new view
         elif what == "play":
             self.playing = not self.playing
             if self.playing:
@@ -257,13 +257,9 @@ class Gui:
         ids = {str(b["id"]) for b in cached}
         for b in lib:
             b["cached"] = str(b["id"]) in ids
-        counts = {}
-        for b in lib:
-            counts.setdefault(author_of(b), {"books": 0, "cached": 0})["books"] += 1
-        for b in cached:
-            counts.setdefault(author_of(b), {"books": 0, "cached": 0})["cached"] += 1
-        self.authors = [{"author": a, "books": v["books"], "cached": v["cached"],
-                         "label": f"{a} ({v['cached']}/{v['books']})"} for a, v in sorted(counts.items())]
+        authors = c.call("/authors", token=self.token)[2]
+        self.authors = [dict(a, label=f"{a['author']} ({a.get('cached', 0)}/{a['books']})")
+                        for a in (authors if isinstance(authors, list) else [])]
         self.collection = None
         self.collections = self.collections_of(self.author)
         self.books = self.list_books(self.author)

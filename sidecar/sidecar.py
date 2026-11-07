@@ -191,11 +191,18 @@ def cached_books():
         "order by b.author, b.title")]
 
 
-def cached_authors():
-    c = connect()
-    return [{"author": r[0], "books": r[1]} for r in c.execute(
-        "select b.author, count(distinct t.book_id) from books b join tracks t on t.book_id = b.id "
-        "group by b.author order by b.author")]
+def cached_authors(bearer):
+    # every author that has books, not only the ones this sidecar cached
+    cached = {r[0]: r[1] for r in connect().execute(
+        "select b.author, count(distinct t.book_id) from books b join tracks t on t.book_id = b.id group by b.author")}
+    out, page = [], 0
+    while True:
+        items = api(f"authors?size=100&page={page}&minBookCount=1", bearer=bearer).get("items", []) or []
+        out += [{"author": a.get("name"), "books": a.get("bookCount") or 0, "cached": cached.get(a.get("name"), 0)}
+                for a in items]
+        if len(items) < 100:
+            return out
+        page += 1
 
 
 def app_state():
@@ -423,7 +430,7 @@ def main():
                 if parts == ["library"]:
                     return self.json(library(b))
                 if parts == ["authors"]:
-                    return self.json(cached_authors())
+                    return self.json(cached_authors(b))
                 if len(parts) == 3 and parts[0] == "authors" and parts[2] == "books":
                     return self.json(by_author(unquote(parts[1]), b))
                 if parts == ["state"]:
