@@ -85,7 +85,8 @@ def library(bearer):
     # BookOrbit has no GET /books list route; POST /books/query accepts an empty query.
     page = api("books/query", "POST", {}, bearer=bearer)
     items = page.get("items", page) if isinstance(page, dict) else page
-    return [{"id": b["id"], "title": b.get("title") or f"book {b['id']}", "authors": b.get("authors") or []}
+    return [{"id": b["id"], "title": b.get("title") or f"book {b['id']}", "authors": b.get("authors") or [],
+            "seriesName": b.get("seriesName")}  # the client groups books by this
             for b in items
             if any((f.get("format") or "").lower() in AUDIO_FORMATS for f in b.get("files", []))]
 

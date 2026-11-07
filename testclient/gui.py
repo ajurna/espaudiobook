@@ -284,11 +284,14 @@ class Gui:
                 for k, v in sorted(cols.items(), key=lambda kv: (kv[0] == self.SOLO, kv[0].lower()))]
 
     def list_books(self, name):
-        mine = [b for b in self.cached if author_of(b) == name] or [b for b in self.all_books if author_of(b) == name]
+        # base the view on the catalog rows (they carry seriesName), then mark what is cached
+        ids = {str(b["id"]) for b in self.cached}
+        mine = [b for b in self.all_books if author_of(b) == name]
         if self.collection:
             mine = [b for b in mine if (b.get("seriesName") or self.SOLO) == self.collection]
         for b in mine:
-            b["label"] = b["title"] + (" *" if b.get("cached") else "")   # * = already on the server
+            b["cached"] = str(b["id"]) in ids
+            b["label"] = b["title"] + (" *" if b["cached"] else "")   # * = already on the server
         return mine
 
     def pick(self, a):
