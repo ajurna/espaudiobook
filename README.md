@@ -111,8 +111,9 @@ GET  /track/{bookId}/{assetId}   audio/mpeg, optional ?from_ms=N
 GET  /healthz
 ```
 
-Every format BookOrbit serves (M4B/M4A/MP3/OPUS/OGG/FLAC) becomes **48 kHz mono 48 kbps CBR MP3**.
-24 kHz is not possible: the ES8311 codec accepts only 8/16/32/44.1/48 kHz. CBR is what makes the
+Every format BookOrbit serves (M4B/M4A/MP3/OPUS/OGG/FLAC) becomes **44.1 kHz mono 48 kbps CBR MP3**.
+24 kHz is not possible: the ES8311 codec accepts only 8/16/32/44.1/48 kHz, and the firmware
+initialises it at 44.1 kHz, so the sidecar outputs 44.1 kHz. CBR is what makes the
 device's seek math exact (6 bytes/ms) and keeps one decoder path on the firmware side.
 M4B/M4A cannot be piped (MP4 needs a seekable input), so those chapters are downloaded in full first.
 

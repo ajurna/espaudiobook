@@ -4,5 +4,5 @@ requires-python = ">=3.13"
 
 [[package]]
 name = "espaudiobook-sidecar"
-version = "0.1.5"
+version = "0.1.7"
 source = { virtual = "." }

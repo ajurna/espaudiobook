@@ -54,7 +54,7 @@ def version():
     p = os.path.join(os.path.dirname(os.path.abspath(__file__)), "pyproject.toml")
     return tomllib.load(open(p, "rb"))["project"]["version"] if os.path.exists(p) else ""
 
-SAMPLE_RATE = 48000
+SAMPLE_RATE = 44100          # matches the firmware ES8311_SAMPLE_RATE
 BITRATE_K = 48
 BYTES_PER_MS = BITRATE_K * 1000 // 8000      # 6 bytes/ms - only true for our CBR output
 AUDIO_FORMATS = {"m4b", "m4a", "mp3", "opus", "ogg", "flac"}

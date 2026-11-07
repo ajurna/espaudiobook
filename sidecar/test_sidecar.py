@@ -29,7 +29,7 @@ def main():
     src = make_fixture(tmp)
 
     dst = sidecar.transcode(src, sidecar.cache_path("7", {"assetId": "aud_test", "etag": "x"}, "all"))
-    assert probe(dst) == (48000, 1), f"expected 48 kHz mono, got {probe(dst)}"
+    assert probe(dst) == (44100, 1), f"expected 48 kHz mono, got {probe(dst)}"
     assert sidecar.transcode(src, dst) == dst, "second call should hit the cache, not re-run ffmpeg"
     assert not os.path.exists(dst + ".part"), "partial file must not survive a completed transcode"
 
@@ -38,7 +38,7 @@ def main():
         data = f.read()
         pos = int(2000 * sidecar.BYTES_PER_MS)
         assert data[sidecar.find_sync(data, pos)] == 0xFF, "seek did not land on a frame start"
-    print("ok: transcode 48kHz mono, cache hit, frame-aligned seek")
+    print("ok: transcode 44.1kHz mono, cache hit, frame-aligned seek")
 
 
 def test_forwarding():
@@ -88,7 +88,7 @@ def test_first_pass():
                                                                 "assetOffsetMs": 0, "startMs": 0, "endMs": 6000})
 
     dst = sidecar.ensure_track("7", "aud_test", 0, "Bearer tok1")
-    assert probe(dst) == (48000, 1), f"expected 48 kHz mono, got {probe(dst)}"
+    assert probe(dst) == (44100, 1), f"expected 48 kHz mono, got {probe(dst)}"
     # a chapter is sliced out of its asset, so the file is chapter-sized, not the whole book
     assert abs(os.path.getsize(dst) - 6000 * sidecar.BYTES_PER_MS) < 4096, f"chapter file {os.path.getsize(dst)} B"
     assert os.path.exists(f"{sidecar.stem('7', asset)}.opus"), "the source stays cached so the next chapter does not re-download"
