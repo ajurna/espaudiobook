@@ -20,6 +20,11 @@ import test_client as c
 SIZE = 320
 R = SIZE // 2                    # usable radius: the physical window is a circle
 REPORT_EVERY_MS = 15000          # same cadence as the firmware
+ROWS, ROW_STEP, ROW_TOP = 6, 24, 40   # rows live above the buttons, so rows and buttons cannot overlap
+
+
+def author_of(b):
+    return (b.get("authors") or [b.get("author") or "(unknown)"])[0]
 
 
 def row_width(y, h=20):
@@ -38,7 +43,9 @@ class Gui:
             # the corners are not visible on the real panel - draw the window so you can see the limit
             self.cv.create_oval(0, 0, SIZE, SIZE, fill="#111", outline="#444")
         self.books, self.chapters, self.book = [], [], None
+        self.all_books = []
         self.authors, self.author, self.view, self.state = [], None, "authors", None
+        self.cursor, self.stack = 0, []
         self.idx = 0                       # chapter being played
         self.pos_ms = 0
         self.playing = False
@@ -63,17 +70,33 @@ class Gui:
         self.cv.create_text(SIZE // 2, y, text=s[:int(row_width(y)) // size], fill=color,
                             font=("TkDefaultFont", size))
 
-    def button(self, y, label, action):
-        w = min(64, row_width(y))          # a 64 px button near the circle edge gets clipped
-        if w < 40:
-            self.status = f"{label} does not fit at y={y} (only {w:.0f} px)"
+    def button(self, label, action, dx=0, dy=0):
+        if not self.root:
             return
-        x = SIZE // 2
-        item = self.cv.create_rectangle(x - w / 2, y - 16, x + w / 2, y + 16, fill="#223", outline="#668",
-                                        tags="ui")
+        w = row_width(R + dy)
+        if w < 60:
+            self.status = f"{label} does not fit at y={dy} (only {w:.0f} px)"
+            return
+        x, y = SIZE // 2 + dx, R + dy
+        item = self.cv.create_rectangle(x - 30, y - 15, x + 30, y + 15, fill="#223", outline="#668", tags="ui")
         self.cv.create_text(item, y, text=label, fill="#cde", font=("TkDefaultFont", 12), tags="ui")
-        if self.root:
-            self.cv.tag_bind(item, "<Button-1>", action)
+        self.cv.tag_bind(item, "<Button-1>", action)
+
+    def page(self, items, open_item):
+        base = (self.cursor // ROWS) * ROWS
+        for i in range(ROWS):
+            n = base + i
+            if n >= len(items):
+                break
+            w = row_width(ROW_TOP + i * ROW_STEP)
+            if w < 120:
+                break
+            label = items[n].get("author") or items[n].get("title") or str(items[n])
+            item = self.cv.create_text(SIZE // 2, ROW_TOP + i * ROW_STEP, text=label[:int(w / 12)],
+                                       fill="#8cf" if n == self.cursor else "#ddd", font=("TkDefaultFont", 12),
+                                       tags="ui")
+            if self.root:
+                self.cv.tag_bind(item, "<Button-1>", lambda e, k=n: (setattr(self, "cursor", k), open_item(items[k])))
 
     def draw(self):
         if not self.root:
@@ -81,26 +104,11 @@ class Gui:
         self.cv.delete("ui")
         self.status = ""
         if self.view == "authors":
-            for i, a in enumerate(self.authors[:8]):
-                y = 40 + i * 24
-                if row_width(y) < 120:
-                    break
-                item = self.cv.create_text(SIZE // 2, y,
-                                           text=f"{a['author']} ({a['books']})"[:int(row_width(y) / 12)],
-                                           fill="#ddd", font=("TkDefaultFont", 12), tags="ui")
-                if self.root:
-                    self.cv.tag_bind(item, "<Button-1>", lambda e, n=a["author"]: self.pick(n))
-            self.cv.create_text(SIZE // 2, 16, text="authors", fill="#888", font=("TkDefaultFont", 12), tags="ui")
-        elif self.book is None:
-            for i, b in enumerate(self.books[:8]):
-                y = 40 + i * 24
-                if row_width(y) < 120:
-                    break
-                item = self.cv.create_text(SIZE // 2, y, text=f"{i + 1}. {b['title'][:int(row_width(y) / 12)]}",
-                                           fill="#ddd", font=("TkDefaultFont", 12), tags="ui")
-                if self.root:
-                    self.cv.tag_bind(item, "<Button-1>", lambda e, bk=b: self.open_book(bk))
-            self.cv.create_text(SIZE // 2, 16, text="books", fill="#888", font=("TkDefaultFont", 12), tags="ui")
+            self.page(self.authors, self.pick)
+            self.cv.create_text(SIZE // 2, 20, text="authors", fill="#888", font=("TkDefaultFont", 12), tags="ui")
+        elif self.view == "books":
+            self.page(self.books, self.open_book)
+            self.cv.create_text(SIZE // 2, 20, text="books", fill="#888", font=("TkDefaultFont", 12), tags="ui")
         else:
             self.text(40, self.book["title"], 14)
             self.text(90, self.chapters[self.idx]["title"] if self.chapters else "", 12, "#8cf")
@@ -108,31 +116,50 @@ class Gui:
             pct = int(self.pos_ms * 100 / max(sum(ch["endMs"] - ch["startMs"] for ch in self.chapters), 1))
             self.cv.create_arc(SIZE // 2 - 70, 150, SIZE // 2 + 70, 290, start=90 - pct * 3.6, extent=pct * 3.6,
                                style="arc", outline="#68a", width=3, tags="ui")
-            for label, y in (("prev", 230), ("play", 270), ("next", 300)):
-                self.button(y, label, lambda e, l=label: self.act(l))
-            self.button(190, "back", lambda e: self.act("back"))
             if self.status:
                 self.cv.create_text(SIZE // 2, 316, text=self.status, fill="#a66", font=("TkDefaultFont", 10),
                                     tags="ui")
+        for label, dx, dy in (("up", -100, 40), ("down", 100, 40), ("go", 0, 110), ("back", 0, 140)):
+            self.button(label, lambda e, l=label: self.act(l), dx, dy)
 
     def act(self, what):
         if what == "back":
-            self.book = None
-            self.view = "authors"
+            self.view = self.stack.pop() if self.stack else "authors"
+            if self.view == "authors":
+                self.book = None
+        elif what in ("up", "down"):
+            if self.view == "player":
+                self.act("prev" if what == "up" else "next")
+                return
+            items = self.authors if self.view == "authors" else self.books
+            if items:
+                self.cursor = max(0, min(len(items) - 1, self.cursor + (-1 if what == "up" else 1)))
+        elif what == "go":
+            if self.view == "player":
+                self.act("play")
+                return
+            items = self.authors if self.view == "authors" else self.books
+            if items:
+                (self.pick if self.view == "authors" else self.open_book)(items[self.cursor])
+                return
         elif what == "play":
             self.playing = not self.playing
             if self.playing:
-                self.play_chapter()
+                if self.root:
+                    self.play_chapter()
+                else:
+                    self.status = "play (skipped, headless)"
             elif self.device:
                 self.device.stop()
             self.report()
         elif what in ("prev", "next"):
             if not self.chapters:
                 return
-            self.idx += -1 if what == "prev" else 1
+            self.idx += -1 if what == "up" or what == "prev" else 1
             self.idx = max(0, min(len(self.chapters) - 1, self.idx))
+            self.cursor = self.idx
             self.pos_ms = self.chapters[self.idx]["startMs"]
-            if self.playing:
+            if self.playing and self.root:
                 self.play_chapter()
         self.draw()
         if self.root:
@@ -180,10 +207,11 @@ class Gui:
         rows = cached or lib            # the cache is the list; an empty cache still shows the catalog
         counts = {}
         for b in rows:
-            a = (b.get("authors") or ["(unknown)"])[0]
+            a = author_of(b)
             counts[a] = counts.get(a, 0) + 1
         self.authors = [{"author": a, "books": counts[a]} for a in sorted(counts)]
-        self.books = [b for b in rows if not self.author or (b.get("authors") or ["(unknown)"])[0] == self.author]
+        self.books = [b for b in rows if not self.author or author_of(b) == self.author]
+        self.all_books = rows
         cur = (self.state or {}).get("book")
         self.book = next((b for b in rows if str(b["id"]) == str(cur)), None)
         if self.book:
@@ -191,16 +219,38 @@ class Gui:
             self.chapters = man.get("chapters", []) if isinstance(man, dict) else []
             self.pos_ms = 0
 
-    def pick(self, name):
+    def pick(self, a):
+        name = a["author"]
         c.call("/state", "PUT", {"author": name}, token=self.token)
         self.author = name
-        self.view = "books"
+        self.books = [b for b in self.all_books if author_of(b) == name]
+        self.goto("books")
 
     def open_book(self, b):
         c.call("/state", "PUT", {"book": b["id"], "author": self.author}, token=self.token)
         self.book = b
         self.idx = 0
-        self.view = "player"
+        self.cursor = 0
+        man = c.call(f"/books/{b['id']}", token=self.token)[2]
+        self.chapters = man.get("chapters", []) if isinstance(man, dict) else []
+        self.pos_ms = self.chapters[self.idx]["startMs"] if self.chapters else 0
+        self.goto("player")
+
+    def goto(self, view):
+        self.stack.append(self.view)
+        self.view = view
+        self.cursor = 0
+
+    def nav(self):
+        """Headless walk through the views using only the on-screen control names."""
+        self.fetch()
+        for what in ("down", "go", "down", "go", "next", "go", "back", "back"):
+            self.act(what)
+            items = self.authors if self.view == "authors" else (self.books if self.view == "books" else self.chapters)
+            cur = items[self.cursor] if items and self.cursor < len(items) else None
+            name = (cur.get("author") or cur.get("title")) if cur else "-"
+            print(f"  {what:<5} {self.view:<8} {name} {self.status}")
+            self.status = ""
 
     def check(self):
         print(f"circle radius {R} px (320x320 panel), firmware row is 300 px, buttons 64 px")
@@ -223,8 +273,10 @@ def fmt(ms):
 
 
 if __name__ == "__main__":
-    g = Gui(headless="--check" in sys.argv)
-    if g.root is None:
+    g = Gui(headless="--check" in sys.argv or "--nav" in sys.argv)
+    if "--nav" in sys.argv:
+        g.nav()
+    elif g.root is None:
         g.check()
     else:
         g.fetch()

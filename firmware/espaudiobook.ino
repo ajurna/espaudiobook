@@ -61,13 +61,14 @@ Audio audio;
 
 struct Chapter { String assetId, title; uint32_t startMs; };
 
-String bookId, bookTitle;
+String bookId, bookTitle, author;
 std::vector<Chapter> chapters;
-int idx = -1;
+std::vector<String> authorNames, bookIds;
+int idx = -1, cursor = 0, page = 0;          // 0 authors, 1 books, 2 player
 bool playing = false, paused = false, finished = false, stalled = false;
 uint8_t retry = 0;
 
-lv_obj_t *booksPage, *playerPage, *statusLbl, *titleLbl, *chapLbl, *timeLbl, *bar;
+lv_obj_t *authorsPage, *booksPage, *playerPage, *statusLbl, *titleLbl, *chapLbl, *timeLbl, *bar;
 uint32_t lastReport = 0, lastUi = 0;
 
 void showPlayer();
@@ -244,12 +245,25 @@ void audio_eof_stream(const char*) { finished = true; }
 
 /* ---------------- UI ---------------- */
 
-void showPage(lv_obj_t* page) {
+void showPage(lv_obj_t* p) {
   lvgl_port_lock(0);
+  page = p == authorsPage ? 0 : (p == booksPage ? 1 : 2);
+  lv_obj_add_flag(authorsPage, LV_OBJ_FLAG_HIDDEN);
   lv_obj_add_flag(booksPage, LV_OBJ_FLAG_HIDDEN);
   lv_obj_add_flag(playerPage, LV_OBJ_FLAG_HIDDEN);
-  lv_obj_clear_flag(page, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_clear_flag(p, LV_OBJ_FLAG_HIDDEN);
   lvgl_port_unlock();
+}
+
+// Same four controls on every page: up, go, down, back. On a list, up/down move the highlighted row
+// and go opens it. On the player, up/down are prev/next chapter and go is play/pause.
+void setFocus(lv_obj_t* list) {
+  for (uint32_t i = 0; i < lv_obj_get_child_count(list); i++)
+    lv_obj_remove_state(lv_obj_get_child(list, i), LV_STATE_FOCUSED);
+  if (!lv_obj_get_child_count(list)) return;
+  lv_obj_t* row = lv_obj_get_child(list, min(cursor, (int)lv_obj_get_child_count(list) - 1));
+  lv_obj_add_state(row, LV_STATE_FOCUSED);
+  lv_obj_scroll_to_view(row, LV_ANIM_OFF);      // rows are clipped by the circle, keep the cursor visible
 }
 
 void refreshUi() {
@@ -288,13 +302,27 @@ void openBook(const char* id) {
 }
 
 void onBook(lv_event_t* e) { openBook((const char*)lv_event_get_user_data(e)); }
+void onAuthor(lv_event_t* e) { pickAuthor((const char*)lv_event_get_user_data(e)); }
 
 void onButton(lv_event_t* e) {
   int what = (int)(intptr_t)lv_event_get_user_data(e);
-  if (what == 0) { if (idx > 0) playChapter(idx - 1, 0); }          // prev
-  else if (what == 1) { audio.pauseResume(); paused = !paused; }     // play/pause (also warms the cache)
-  else if (what == 2) { playChapter(idx + 1, 0); }                   // next
-  else showPage(booksPage);                                          // back
+  if (what == 3) { showPage(page == 2 ? booksPage : authorsPage); return; }   // back
+  if (page == 2) {
+    if (what == 1) { audio.pauseResume(); paused = !paused; }
+    else if (what == 0 && idx > 0) playChapter(idx - 1, 0);
+    else if (what == 2) playChapter(idx + 1, 0);
+    return;
+  }
+  if (what == 1) {                                                        // go
+    if (page == 1) openBook(bookIds[cursor].c_str()); else pickAuthor(authorNames[cursor].c_str());
+    return;
+  }
+  int n = page == 1 ? (int)bookIds.size() : (int)authorNames.size();
+  if (!n) return;
+  cursor = max(0, min(n - 1, cursor + (what == 0 ? -1 : 1)));
+  lvgl_port_lock(0);
+  setFocus(page == 1 ? booksPage : authorsPage);
+  lvgl_port_unlock();
 }
 
 lv_obj_t* makeButton(lv_obj_t* parent, const char* text, int what) {
@@ -308,8 +336,13 @@ lv_obj_t* makeButton(lv_obj_t* parent, const char* text, int what) {
 }
 
 void buildUi() {
+  authorsPage = lv_list_create(lv_scr_act());
   booksPage = lv_list_create(lv_scr_act());
-  lv_obj_set_size(booksPage, 360, 360);
+  // rows in the upper band, controls in the lower band: a 300 px row cannot share a row with a button
+  for (lv_obj_t* p : {authorsPage, booksPage}) {
+    lv_obj_set_size(p, 320, 170);
+    lv_obj_align(p, LV_ALIGN_TOP_MID, 0, 40);
+  }
   statusLbl = lv_label_create(lv_scr_act());
   lv_obj_align(statusLbl, LV_ALIGN_TOP_MID, 0, 6);
   lv_obj_add_flag(statusLbl, LV_OBJ_FLAG_HIDDEN);
@@ -327,17 +360,14 @@ void buildUi() {
   lv_obj_align(titleLbl, LV_ALIGN_TOP_MID, 0, 40);
   lv_obj_align(chapLbl, LV_ALIGN_CENTER, 0, 0);
   lv_obj_align(timeLbl, LV_ALIGN_CENTER, 0, 20);
-  lv_obj_t* row = lv_obj_create(playerPage);
-  lv_obj_remove_style_all(row);
-  lv_obj_set_size(row, 300, 64);
-  lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
-  lv_obj_set_flex_align(row, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-  lv_obj_align(row, LV_ALIGN_BOTTOM_MID, 0, -40);
-  makeButton(row, "prev", 0);
-  makeButton(row, "play", 1);
-  makeButton(row, "next", 2);
-  makeButton(row, "back", 3);
 
+  // fixed control bar, offsets from the panel centre, all four inside R=160
+  for (int i = 0; i < 4; i++) {
+    int dx = (i == 0 ? -100 : i == 1 ? 0 : i == 2 ? 100 : 0);
+    int dy = (i == 3 ? 140 : i == 1 ? 110 : 40);
+    lv_obj_t* b = makeButton(lv_scr_act(), (i == 1 ? "go" : (i == 0 ? "up" : (i == 2 ? "down" : "back"))), i);
+    lv_obj_align(b, LV_ALIGN_CENTER, dx, dy);
+  }
   lv_obj_add_flag(playerPage, LV_OBJ_FLAG_HIDDEN);
 }
 
@@ -348,11 +378,42 @@ void fillBookList() {
     lv_label_set_text(statusLbl, "sidecar unreachable");
     return;
   }
+  lvgl_port_lock(0);
+  lv_obj_clean(booksPage);
+  bookIds.clear();
   for (JsonVariant b : doc.as<JsonArray>()) {
+    if (author.length() && strcmp(b["author"].as<const char*>(), author.c_str()) != 0) continue;
     String id = b["id"].as<String>();
-    lv_obj_t* btn = lv_list_add_button(booksPage, NULL, b["title"].as<const char*>());
-    lv_obj_add_event_cb(btn, onBook, LV_EVENT_CLICKED, strdup(id.c_str()));
+    bookIds.push_back(id);
+    lv_obj_t* row = lv_list_add_button(booksPage, NULL, b["title"].as<const char*>());
+    lv_obj_add_event_cb(row, onBook, LV_EVENT_CLICKED, strdup(id.c_str()));
   }
+  cursor = 0;
+  setFocus(booksPage);
+  lvgl_port_unlock();
+}
+
+void fillAuthorList() {
+  JsonDocument doc;
+  if (!getJson("/authors", doc)) return;
+  lvgl_port_lock(0);
+  lv_obj_clean(authorsPage);
+  authorNames.clear();
+  for (JsonVariant a : doc.as<JsonArray>()) {
+    String name = a["author"].as<String>();
+    authorNames.push_back(name);
+    lv_obj_t* row = lv_list_add_button(authorsPage, NULL, (name + " (" + String(a["books"].as<int>()) + ")").c_str());
+    lv_obj_add_event_cb(row, onAuthor, LV_EVENT_CLICKED, strdup(name.c_str()));
+  }
+  cursor = 0;
+  setFocus(authorsPage);
+  lvgl_port_unlock();
+}
+
+void pickAuthor(const char* name) {
+  author = name;
+  fillBookList();
+  showPage(booksPage);
 }
 
 /* ---------------- setup ---------------- */
@@ -399,7 +460,10 @@ void setup() {
   if (!token()) Serial.println("no session - check BOOK_USER/BOOK_PASS");
 
   buildUi();
-  fillBookList();
+  JsonDocument doc;
+  if (getJson("/state", doc) && doc["author"].is<const char*>()) author = doc["author"].as<const char*>();
+  fillAuthorList();                       // the app starts on the author select
+  showPage(authorsPage);
 }
 
 void loop() {
