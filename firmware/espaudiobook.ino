@@ -146,10 +146,10 @@ bool getJson(const String& path, JsonDocument& doc) { return jsonReq("GET", path
 
 /* ---------------- sidecar client ---------------- */
 
-String cachePath(const String& assetId) { return "/sdcard/" + bookId + "/" + assetId + ".mp3"; }
+String cachePath(int ch) { return "/sdcard/" + bookId + "/" + chapters[ch].assetId + "_" + String(ch) + ".mp3"; }
 
-size_t cachedSize(const String& assetId) {
-  File f = SD_MMC.open(cachePath(assetId));
+size_t cachedSize(int ch) {
+  File f = SD_MMC.open(cachePath(ch));
   if (!f) return 0;
   size_t s = f.size();
   f.close();
@@ -158,15 +158,15 @@ size_t cachedSize(const String& assetId) {
 
 // Oldest = earliest cached chapter in manifest order, i.e. the one already listened to. SDFS reports
 // no free space or file times, so the total is summed from the manifest's chapters.
-void evictCard(const String& keep) {
+void evictCard(int keep) {
   size_t used = 0;
-  for (const auto& c : chapters) used += cachedSize(c.assetId);
+  for (int i = 0; i < (int)chapters.size(); i++) used += cachedSize(i);
   if (used <= (size_t)CACHE_MAX_KB * 1024) return;
-  for (const auto& c : chapters) {
-    if (c.assetId == keep) continue;
-    size_t s = cachedSize(c.assetId);
+  for (int i = 0; i < (int)chapters.size(); i++) {
+    if (i == keep) continue;
+    size_t s = cachedSize(i);
     if (!s) continue;
-    SD_MMC.remove(cachePath(c.assetId).c_str());
+    SD_MMC.remove(cachePath(i).c_str());
     used -= s;
     if (used <= (size_t)CACHE_MAX_KB * 1024) break;
   }
@@ -174,22 +174,23 @@ void evictCard(const String& keep) {
 
 // Only complete tracks count as a cache, otherwise the player would play half a chapter: the
 // sidecar sends Content-Length only for tracks it has fully transcoded.
-bool download(const String& assetId) {
+bool download(int ch) {
   HTTPClient http;
   http.setTimeout(15000);
+  String path = "/track/" + bookId + "/" + chapters[ch].assetId + "?chapter=" + String(ch);
   if (strncmp(SIDECAR, "https", 5) == 0) {
     WiFiClientSecure secure;
     secure.setCACert(CA_CERT);
-    http.begin(secure, SIDECAR + "/track/" + bookId + "/" + assetId);
+    http.begin(secure, SIDECAR + path);
   } else {
-    http.begin(SIDECAR + "/track/" + bookId + "/" + assetId);
+    http.begin(SIDECAR + path);
   }
   http.setAuthorization(("Bearer " + token()).c_str());
-  evictCard(assetId);
+  evictCard(ch);
   if (http.GET() != 200) { http.end(); return false; }
   size_t len = http.contentLength();
   if (!len) { http.end(); return false; }        // unknown length = a stream, not a cache entry
-  String part = cachePath(assetId) + ".part";
+  String part = cachePath(ch) + ".part";
   File f = SD_MMC.open(part, O_WRONLY);
   if (!f) { http.end(); return false; }
   WiFiClient* s = http.getStreamPtr();
@@ -200,7 +201,7 @@ bool download(const String& assetId) {
   f.close();
   http.end();
   if (got != len) { SD_MMC.remove(part); return false; }
-  SD_MMC.rename(part, cachePath(assetId).c_str());
+  SD_MMC.rename(part, cachePath(ch).c_str());
   return true;
 }
 
@@ -218,14 +219,14 @@ void report() {
 void playChapter(int i, uint32_t resumeMs) {
   if (i < 0 || i >= (int)chapters.size()) return;
   idx = i;
-  bool fromCard = cachedSize(chapters[i].assetId) > 0;
+  bool fromCard = cachedSize(i) > 0;
   if (fromCard) {
-    if (!audio.connecttoFS(SD_MMC, cachePath(chapters[i].assetId).c_str())) return;
+    if (!audio.connecttoFS(SD_MMC, cachePath(i).c_str())) return;
     if (resumeMs) audio.setAudioPlayPosition(resumeMs / 1000);   // works because our output is CBR
   } else {
     // the audio library builds its own request line and cannot add an Authorization header
     // (it only sends Basic auth), so the token rides in the query for the stream path.
-    String url = SIDECAR + "/track/" + bookId + "/" + chapters[i].assetId + "?token=" + token();
+    String url = SIDECAR + "/track/" + bookId + "/" + chapters[i].assetId + "?token=" + token() + "&chapter=" + String(i);
     if (resumeMs) url += "&from_ms=" + String(resumeMs);
     if (!audio.connecttohost(url.c_str())) return;
   }
@@ -429,7 +430,7 @@ void loop() {
   if (idx >= 0 && (!playing || paused)) {
     int warmed = 0;
     for (int i = idx + 1; i < (int)chapters.size() && warmed < PREFETCH; i++) {
-      if (cachedSize(chapters[i].assetId) == 0 && !download(chapters[i].assetId)) break;
+      if (cachedSize(i) == 0 && !download(i)) break;
       warmed++;
     }
   }

@@ -9,7 +9,6 @@ name: espaudiobook
 # token rides in the URL for the audio stream, so plain http would leak it.
 services:
   sidecar:
-    build: ./sidecar
     image: ajurna/espaudiobook-sidecar
     container_name: espaudiobook-sidecar
     restart: unless-stopped

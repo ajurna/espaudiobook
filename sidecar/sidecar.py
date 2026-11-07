@@ -32,7 +32,10 @@ CBR MP3 - one decoder path on the device and exact seek math (6 bytes/ms).
 import json
 import os
 import shutil
+import sqlite3
 import subprocess
+import threading
+import time
 import tomllib
 import uuid
 from datetime import datetime, timezone
@@ -55,6 +58,13 @@ SAMPLE_RATE = 48000
 BITRATE_K = 48
 BYTES_PER_MS = BITRATE_K * 1000 // 8000      # 6 bytes/ms - only true for our CBR output
 AUDIO_FORMATS = {"m4b", "m4a", "mp3", "opus", "ogg", "flac"}
+_LOCKS = {}
+_GUARD = threading.Lock()
+
+
+def lock_for(path):
+    with _GUARD:
+        return _LOCKS.setdefault(path, threading.Lock())
 CACHE_MAX_BYTES = int(os.environ.get("CACHE_MAX_BYTES", "0"))   # 0 = no cap, manual rm is the policy
 
 
@@ -63,11 +73,15 @@ def api(path, method="GET", body=None, timeout=30, bearer=""):
     if bearer:
         req.add_header("authorization", bearer)
     data = json.dumps(body).encode() if body is not None else None
+    if data:
+        # BookOrbit's body parser only reads JSON when content-type says so; without this every POST
+        # and PUT comes back 400.
+        req.add_header("content-type", "application/json")
     with urlopen(req, data, timeout=timeout) as r:
         return json.load(r)
 
 
-def book_list(bearer):
+def library(bearer):
     # BookOrbit has no GET /books list route; POST /books/query accepts an empty query.
     page = api("books/query", "POST", {}, bearer=bearer)
     items = page.get("items", page) if isinstance(page, dict) else page
@@ -79,6 +93,7 @@ def book_list(bearer):
 def book_detail(book_id, bearer):
     m = api(f"audiobooks/{book_id}/manifest", bearer=bearer)
     sweep(book_id, m["assets"])
+    add_book(book_id, m["book"].get("title"), (m["book"].get("authors") or [""])[0])
     return {"id": m["book"]["id"], "title": m["book"]["title"], "authors": m["book"]["authors"],
             "narrators": m["book"]["narrators"], "totalDurationMs": m["totalDurationMs"],
             "revision": m["revision"],
@@ -103,29 +118,132 @@ def save_state(book_id, asset_id, position_ms, bearer):
         "operationId": str(uuid.uuid4()),
         "baseRevision": current.get("revision", 0),
         "manifestRevision": current.get("manifestRevision") or book_detail(book_id, bearer)["revision"],
-    })
+    }, bearer=bearer)
+
+
+def connect():
+    # path read here, not at import, so a test or a changed CACHE_DIR still lands in the right place
+    c = sqlite3.connect(os.path.join(CACHE_DIR, "sidecar.db"))
+    c.execute("create table if not exists books(id text primary key, title text, author text)")
+    c.execute("create table if not exists tracks(book_id text, asset_id text, ch integer, path text, "
+              "size integer, mtime real, primary key(book_id, asset_id, ch))")
+    # one row: the app's current state, so it can reopen where it left off
+    c.execute("create table if not exists state(id integer primary key check(id = 1), book_id text, author text)")
+    return c
+
+
+def add_book(book_id, title, author):
+    c = connect()
+    c.execute("insert or replace into books values(?,?,?)", (str(book_id), title, author))
+    c.commit()
+
+
+def add_entry(book_id, asset, ch, path, bearer=""):
+    c = connect()
+    b = str(book_id)
+    if not c.execute("select 1 from books where id = ?", (b,)).fetchone():
+        m = api(f"audiobooks/{book_id}/manifest", bearer=bearer)
+        add_book(b, m["book"].get("title"), (m["book"].get("authors") or [""])[0])
+    c.execute("insert or replace into tracks values(?,?,?,?,?,?)",
+              (b, asset["assetId"], ch, path, os.path.getsize(path), time.time()))
+    c.commit()
+    prune(c)
+
+
+def load_db():
+    c = connect()
+    rows = c.execute("select book_id, asset_id, ch, path, size from tracks order by mtime desc").fetchall()
+    s = c.execute("select book_id, author from state where id = 1").fetchone()
+    if s:
+        rows.append(("state", s[1], "", "", 0))     # the app's current state, never pruned
+    return rows
+
+
+def cached_books():
+    c = connect()
+    return [{"id": r[0], "title": r[1], "authors": [r[2]]} for r in c.execute(
+        "select distinct b.id, b.title, b.author from books b join tracks t on t.book_id = b.id "
+        "order by b.author, b.title")]
+
+
+def cached_authors():
+    c = connect()
+    return [{"author": r[0], "books": r[1]} for r in c.execute(
+        "select b.author, count(distinct t.book_id) from books b join tracks t on t.book_id = b.id "
+        "group by b.author order by b.author")]
+
+
+def app_state():
+    r = connect().execute("select book_id, author from state where id = 1").fetchone()
+    return {"book": r[0], "author": r[1]} if r else None
+
+
+def save_app_state(book_id, author):
+    c = connect()
+    cur = app_state() or {}
+    c.execute("insert or replace into state values(1,?,?)",
+              (str(book_id) if book_id else cur.get("book") or "",
+               author if author is not None else cur.get("author") or ""))
+    c.commit()
+    return app_state()
+
+
+def prune(c):
+    """Keep the newest book per author plus the app's current book, oldest first, until CACHE_MAX_BYTES.
+    The state row is never dropped - that is what the app reopens on."""
+    if not CACHE_MAX_BYTES:
+        return
+    rows = c.execute("select t.book_id, b.author, t.size, t.path from tracks t join books b on b.id = t.book_id "
+                     "order by t.mtime").fetchall()
+    newest = {}
+    for r in sorted(c.execute("select t.book_id, b.author, t.mtime from tracks t join books b on b.id = t.book_id"),
+                    key=lambda r: r[2], reverse=True):
+        newest.setdefault(r[1], r[0])
+    keep = set(newest.values()) | ({r[0] for r in c.execute("select book_id from state where id = 1")})
+    total = sum(r[2] for r in rows)
+    for b, a, s, p in rows:
+        if total <= CACHE_MAX_BYTES:
+            break
+        if b in keep:
+            continue
+        if os.path.exists(p):
+            os.remove(p)
+        c.execute("delete from tracks where path = ?", (p,))
+        total -= s
+    c.execute("delete from books where id not in (select distinct book_id from tracks)")
+    c.commit()
 
 
 def key(s):
     return "".join(c for c in (s or "") if c.isalnum() or c in "-_") or "x"
 
 
-def cache_path(book_id, asset):
+def stem(book_id, asset):
     # etag in the name so a source file re-processed by BookOrbit cannot serve stale audio
-    return os.path.join(CACHE_DIR, str(book_id), f"{asset['assetId']}_{key(asset['etag'])}.mp3")
+    return os.path.join(CACHE_DIR, str(book_id), f"{asset['assetId']}_{key(asset.get('etag'))}")
+
+
+def cache_path(book_id, asset, suffix):
+    return f"{stem(book_id, asset)}_{suffix}.mp3"
 
 
 def sweep(book_id, assets):
-    """Drop entries no live asset points at: stale etag, or a book/chapter deleted in BookOrbit."""
+    """Drop entries no live asset points at: stale etag, or a book/chapter deleted in BookOrbit.
+    A cached source and its chapter files share the same asset_etag prefix."""
     d = os.path.join(CACHE_DIR, str(book_id))
     if not os.path.isdir(d):
         return
-    live = {os.path.basename(cache_path(book_id, a)) for a in assets}
+    live = {f"{a['assetId']}_{key(a.get('etag'))}" for a in assets}
     for name in os.listdir(d):
-        if name not in live:
+        if not any(name.startswith(p) for p in live):
             os.remove(os.path.join(d, name))
     if not os.listdir(d):
         os.rmdir(d)
+    c = connect()
+    for (p,) in c.execute("select path from tracks where book_id = ?", (str(book_id),)).fetchall():
+        if not os.path.exists(p):
+            c.execute("delete from tracks where path = ?", (p,))
+    c.commit()
 
 
 def evict(keep=None):
@@ -135,6 +253,8 @@ def evict(keep=None):
     items, total = [], 0
     for root, _, names in os.walk(CACHE_DIR):
         for n in names:
+            if n.endswith(".db"):                       # the index itself is not cache to evict
+                continue
             p = os.path.join(root, n)
             s = os.path.getsize(p)
             total += s
@@ -156,22 +276,24 @@ def find_sync(data, start=0):
     return start
 
 
-def ffmpeg_cmd(src, dst, from_ms=0):
+def ffmpeg_cmd(src, dst, from_ms=0, span_ms=0):
     cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error"]
     if from_ms:
         cmd += ["-ss", f"{from_ms / 1000:.3f}"]
+    if span_ms:
+        cmd += ["-t", f"{span_ms / 1000:.3f}"]
     return cmd + ["-i", src, "-vn", "-map", "0:a:0", "-af", "aformat=channel_layouts=mono",
                   "-c:a", "libmp3lame", "-ar", str(SAMPLE_RATE), "-b:a", f"{BITRATE_K}k",
                   "-f", "mp3", "-y", dst]
 
 
-def transcode(src, dst, from_ms=0):
+def transcode(src, dst, from_ms=0, span_ms=0):
     """Any BookOrbit audio format -> 48 kHz mono CBR MP3. Reuses the cached file."""
     if os.path.exists(dst):
         return dst
     os.makedirs(os.path.dirname(dst) or ".", exist_ok=True)
     part = dst + ".part"
-    subprocess.run(ffmpeg_cmd(src, part, from_ms), check=True)
+    subprocess.run(ffmpeg_cmd(src, part, from_ms, span_ms), check=True)
     os.replace(part, dst)
     return dst
 
@@ -194,23 +316,37 @@ def asset_entry(book_id, asset_id, bearer):
     raise LookupError(f"asset {asset_id} is not in book {book_id}")
 
 
-def ensure_track(book_id, asset_id, bearer):
-    """The whole chapter as one cached CBR MP3. The device can only cache what it can verify against
-    a content-length, so the file is complete before the first byte is sent."""
-    a = asset_entry(book_id, asset_id, bearer)
-    dst = cache_path(book_id, a)
-    if os.path.exists(dst):
+def chapter_entry(book_id, asset_id, ch_idx, bearer):
+    m = api(f"audiobooks/{book_id}/manifest", bearer=bearer)
+    asset = next((a for a in m["assets"] if a["assetId"] == asset_id), None)
+    if not asset:
+        raise LookupError(f"asset {asset_id} is not in book {book_id}")
+    ch = next((c for c in m["chapters"] if c["assetId"] == asset_id and ch_idx is not None
+               and c["sequence"] == ch_idx), None)
+    return asset, ch
+
+
+def ensure_track(book_id, asset_id, ch_idx, bearer):
+    """One chapter as a cached CBR MP3. For an M4B the asset is the whole book - the live run pulled
+    35 MB for a 2-minute chapter - so the cache is per chapter, sliced from a source that is kept on
+    disk and downloaded once. The device can only cache what it can verify against a content-length,
+    so the file is complete before the first byte is sent."""
+    asset, ch = chapter_entry(book_id, asset_id, ch_idx, bearer)
+    ext = (asset["format"] or "bin").lower()
+    src = f"{stem(book_id, asset)}.{ext}"
+    dst = cache_path(book_id, asset, ch["sequence"] if ch else "all")
+    with lock_for(src):
+        if not os.path.exists(src):
+            os.makedirs(os.path.dirname(src) or ".", exist_ok=True)
+            # MP4 needs a seekable input, so the source is a file, not a pipe
+            with open_asset(book_id, asset_id, bearer) as r, open(src, "wb") as f:
+                shutil.copyfileobj(r, f)
+    with lock_for(dst):
+        span = (ch["endMs"] - ch["startMs"]) if ch else 0
+        transcode(src, dst, (ch or {}).get("assetOffsetMs", 0), span)
+        evict(dst)
+        add_entry(book_id, asset, ch["sequence"] if ch else 0, dst, bearer)
         return dst
-    fmt = (a["format"] or "").lower()
-    os.makedirs(os.path.dirname(dst) or ".", exist_ok=True)
-    # the source stays on disk during the run because MP4 needs a seekable input
-    src = os.path.join(CACHE_DIR, str(book_id), f"{asset_id}.{fmt}")
-    with open_asset(book_id, asset_id, bearer) as r, open(src, "wb") as f:
-        shutil.copyfileobj(r, f)
-    transcode(src, dst)
-    os.remove(src)
-    evict(dst)
-    return dst
 
 
 def send_file(path, from_ms, send):
@@ -258,14 +394,22 @@ def main():
                 if not b:
                     return self.json({"error": "no token"}, 401)
                 if parts == ["books"]:
-                    return self.json(book_list(b))
+                    return self.json(cached_books())
+                if parts == ["library"]:
+                    return self.json(library(b))
+                if parts == ["authors"]:
+                    return self.json(cached_authors())
+                if parts == ["state"]:
+                    return self.json(app_state())
                 if len(parts) == 2 and parts[0] == "books":
                     return self.json(book_detail(parts[1], b))
                 if len(parts) == 3 and parts[0] == "books" and parts[2] == "state":
                     return self.json(book_state(parts[1], b))
                 if len(parts) == 3 and parts[0] == "track":
-                    from_ms = int((parse_qs(u.query).get("from_ms") or ["0"])[0])
-                    path = ensure_track(parts[1], parts[2], b)
+                    q = parse_qs(u.query)
+                    from_ms = int((q.get("from_ms") or ["0"])[0])
+                    ch = q.get("chapter")
+                    path = ensure_track(parts[1], parts[2], int(ch[0]) if ch else None, b)
                     self.send_response(200)
                     self.send_header("content-type", "audio/mpeg")
                     # the device only stores a track when this matches what it received
@@ -294,8 +438,10 @@ def main():
             u = urlparse(self.path)
             parts = [p for p in u.path.split("/") if p]
             try:
+                body = json.loads(self.rfile.read(int(self.headers.get("content-length", 0))) or b"{}")
+                if parts == ["state"]:
+                    return self.json(save_app_state(body.get("book"), body.get("author")))
                 if len(parts) == 3 and parts[0] == "books" and parts[2] == "state":
-                    body = json.loads(self.rfile.read(int(self.headers.get("content-length", 0))) or b"{}")
                     return self.json(save_state(parts[1], body["assetId"], int(body["positionMs"]), self.bearer()))
                 self.json({"error": "not found"}, 404)
             except HTTPError as e:

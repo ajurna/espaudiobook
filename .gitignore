@@ -6,3 +6,4 @@ data/
 certs/
 __pycache__/
 .idea/
+testclient/.token

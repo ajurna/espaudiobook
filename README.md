@@ -21,6 +21,11 @@ python3 sidecar/sidecar.py
 python3 sidecar/test_sidecar.py      # transcode + cache-hit + frame-aligned seek
 ```
 
+Against the deployed sidecar, `testclient/test_client.py` behaves like the ESP32 (Bearer header, `?token=`
+for the stream, the 3-chapter prefetch burst, cold vs warm first byte). Put your connection details in
+`testclient/.env` (SIDECAR_URL, BOOKORBIT_USER/BOOKORBIT_PASSWORD, or TEST_TOKEN) — it writes playback
+state to whatever server you point it at, so pick a book you do not mind touching.
+
 Deploy (image = python + ffmpeg only):
 
 ```sh

@@ -28,7 +28,7 @@ def main():
     sidecar.CACHE_DIR = tmp
     src = make_fixture(tmp)
 
-    dst = sidecar.transcode(src, sidecar.cache_path("7", {"assetId": "aud_test", "etag": "x"}))
+    dst = sidecar.transcode(src, sidecar.cache_path("7", {"assetId": "aud_test", "etag": "x"}, "all"))
     assert probe(dst) == (48000, 1), f"expected 48 kHz mono, got {probe(dst)}"
     assert sidecar.transcode(src, dst) == dst, "second call should hit the cache, not re-run ffmpeg"
     assert not os.path.exists(dst + ".part"), "partial file must not survive a completed transcode"
@@ -80,12 +80,20 @@ def test_first_pass():
         def read(self, n=-1): return self.f.read(n)
 
     sidecar.open_asset = lambda b, a, bearer: FakeResp()
-    sidecar.asset_entry = lambda b, a, bearer: {"assetId": a, "format": "opus", "etag": "x"}
+    asset = {"assetId": "aud_test", "format": "opus", "etag": "x"}
+    manifest = {"book": {"id": "7", "title": "Mock", "authors": ["Ann"]}, "assets": [asset], "chapters": []}
+    real_api = sidecar.api                      # so a later test does not inherit this fake
+    sidecar.api = lambda path, method="GET", body=None, timeout=30, bearer="": manifest
+    sidecar.chapter_entry = lambda b, a, idx, bearer: (asset, {"sequence": idx, "assetId": a,
+                                                                "assetOffsetMs": 0, "startMs": 0, "endMs": 6000})
 
-    dst = sidecar.ensure_track("7", "aud_test", "Bearer tok1")
+    dst = sidecar.ensure_track("7", "aud_test", 0, "Bearer tok1")
     assert probe(dst) == (48000, 1), f"expected 48 kHz mono, got {probe(dst)}"
-    assert not os.path.exists(os.path.join(tmp, "aud_test.opus")), "the source file must not stay behind"
-    print("ok: whole chapter complete before serving, source cleaned up")
+    # a chapter is sliced out of its asset, so the file is chapter-sized, not the whole book
+    assert abs(os.path.getsize(dst) - 6000 * sidecar.BYTES_PER_MS) < 4096, f"chapter file {os.path.getsize(dst)} B"
+    assert os.path.exists(f"{sidecar.stem('7', asset)}.opus"), "the source stays cached so the next chapter does not re-download"
+    sidecar.api = real_api
+    print("ok: chapter sliced from the cached source, chapter-sized file")
 
 
 def test_clean():
@@ -94,12 +102,12 @@ def test_clean():
     os.makedirs(os.path.join(tmp, "7"))
     live = {"assetId": "aud_1", "etag": "abc"}
     stale = {"assetId": "aud_1", "etag": "old"}
-    open(sidecar.cache_path("7", live), "wb").write(b"x" * 100)
-    open(sidecar.cache_path("7", stale), "wb").write(b"y" * 100)
-    open(os.path.join(tmp, "7", "aud_gone_xyz.mp3"), "wb").write(b"z" * 100)
+    open(sidecar.cache_path("7", live, 0), "wb").write(b"x" * 100)
+    open(sidecar.cache_path("7", stale, 0), "wb").write(b"y" * 100)
+    open(os.path.join(tmp, "7", "aud_gone_xyz_0.mp3"), "wb").write(b"z" * 100)
     sidecar.sweep("7", [live])
-    assert os.path.exists(sidecar.cache_path("7", live)), "live entry must survive"
-    assert not os.path.exists(sidecar.cache_path("7", stale)), "stale etag must be dropped"
+    assert os.path.exists(sidecar.cache_path("7", live, 0)), "live entry must survive"
+    assert not os.path.exists(sidecar.cache_path("7", stale, 0)), "stale etag must be dropped"
     assert not os.path.exists(os.path.join(tmp, "7", "aud_gone_xyz.mp3")), "orphan must be dropped"
 
     sidecar.CACHE_MAX_BYTES = 150
