@@ -14,3 +14,9 @@ sim/lvgl/
 *.exe
 *.bmp
 *.png
+
+.pio/
+
+WS-1.85C/
+player/lib/lvgl
+player/lib/ESP32-audioI2S-master

@@ -11,7 +11,7 @@ Board: Waveshare **ESP32-S3-Touch-LCD-1.85C V2** (ST77916 360×360, CST816 touch
 
 ## 1. Sidecar
 
-Needs `ffmpeg` on PATH, no other dependencies.
+Needs `ffmpeg` on PATH plus `fastapi` + `uvicorn` (`uv sync` first).
 
 ```sh
 export BOOKORBIT_URL=http://127.0.0.1:3000
@@ -71,6 +71,10 @@ The ESP32 points at `http://<host>:8090`. Cache lives in `./data/sidecar` (the c
 only `/cache` and `/tmp` are writable); delete it anytime, it is rebuildable from BookOrbit. If the
 bind mount is owned by a host uid other than 1000, set `PUID`/`PGID` to it.
 
+The sqlite index stores only what the cache actually holds — cached files and the book each one
+belongs to. Nothing else is persisted: playback state stays on BookOrbit, so `/state` is a
+pass-through and a book row only exists while that book has cached audio.
+
 Cache is cleaned on its own. Opening a book drops entries no live asset points at — stale etag (the
 file was re-processed by BookOrbit) or an asset/book deleted upstream — and `CACHE_MAX_BYTES`
 evicts oldest-first after each transcode. On the card the same idea in manifest order: `CACHE_MAX_KB`
@@ -107,6 +111,8 @@ GET  /books                      [{id,title,authors}]          audiobooks only
 GET  /books/{id}                 book + chapters [{assetId,title,startMs,endMs,durationMs}]
 GET  /books/{id}/state           {assetId,positionMs,percentage} | null
 PUT  /books/{id}/state           {"assetId":"...","positionMs":1234}   (sidecar adds revision/op fields)
+GET  /state?book={id}            same as /books/{id}/state, nothing is stored here
+PUT  /state                      {"book":"...","assetId":"...","positionMs":1234}  (same pass-through)
 GET  /track/{bookId}/{assetId}   audio/mpeg, optional ?from_ms=N
 GET  /healthz
 ```
@@ -120,17 +126,21 @@ M4B/M4A cannot be piped (MP4 needs a seekable input), so those chapters are down
 ## 2. Firmware
 
 Libraries: Arduino ESP32 core 2.x/3.x, **LVGL 9.3**, **ESP32-audioI2S**, **ArduinoJson 7**.
-Set `WIFI_SSID`, `WIFI_PASS`, `SIDECAR` at the top of `espaudiobook.ino`, then upload.
+Set `WIFI_SSID`, `WIFI_PASSWORD`, `SIDECAR_URL` (and the cert) in `src/config.h`, then `pio run` and upload.
 
-Pins (V2): I2S MCK=2 BCK=48 LRCK=38 DOUT=47, codec at I2C addr `0x18` (SDA 11 / SCL 10),
-amp enable GPIO15 high, backlight GPIO5, SDMMC CLK=14 CMD=17 D0=16 (4-bit), touch INT GPIO4,
-LCD/touch reset via the TCA9554 expander (EXIO1/EXIO2). For a V1 board (PCM5101) drop the codec
-init and change the pin defines — everything board-specific is in `initBoard()`.
+Pins (V2): I2S MCK=2 BCK=48 LRCK=38 DOUT=47, codec at I2C addr `0x18` (SDA 11 / SCL 10 from
+`lib/I2C_Driver`), amp enable GPIO15 high, backlight GPIO5, SDMMC CLK=14 CMD=17 D0=16 (4-bit), touch
+INT GPIO4, LCD/touch reset via the TCA9554 expander (EXIO1/EXIO2). For a V1 board (PCM5101) drop the
+codec init and change the pin defines — everything board-specific is in `src/config.h`.
 
-`firmware/*.{h,c,cpp}` are Waveshare's Apache-2.0 example drivers, copied unmodified; the app is
-only `espaudiobook.ino`.
+`firmware/lib/*` are Waveshare's Apache-2.0 example drivers, copied unmodified; the app is `src/`
+(`main.cpp` + `SidecarClient` + `AudioPlayer` + `UIController` + `ui.c`). LVGL is not a PlatformIO dep: it is
+the tree the PC sim builds from (`lib_extra_dirs = ../sim`), and `lib/LVGL_Driver/lv_conf.h` is the
+`lv_conf.h` that gets picked up (`LV_OS_NONE`, depth 16). If `sim/lvgl` is not there, use
+`lib_deps = lvgl/lvgl@^9.3`.
 
-UI: book list → player (title, chapter, time, progress bar, prev/play/next/back).
+UI: authors → collections → books → chapters → player, one roller plus four buttons (`up`, `go`, `down`,
+`back`); on the player `up`/`down` are prev/next chapter and `go` is play/pause.
 
 ## 3. How a track is picked
 

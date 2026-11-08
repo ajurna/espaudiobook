@@ -9,7 +9,11 @@ lives in this file. The firmware only ever talks to the endpoints below.
                                      chapters: [{id, title, assetId, startMs, endMs, durationMs}]}
   GET  /books/{id}/state          -> {assetId, positionMs, percentage} | null
   PUT  /books/{id}/state          <- {"assetId": "...", "positionMs": 1234}
+  GET  /state?book={id}           -> same as /books/{id}/state, nothing is stored here
+  PUT  /state                     <- {"book": "...", "assetId": "...", "positionMs": 1234}
   GET  /track/{bookId}/{assetId}  -> audio/mpeg, optional ?from_ms=N (frame-aligned)
+  GET  /track?book={id}&chapter=N -> the same stream addressed by chapter number, which is what the
+                                      player caches on the card
   POST /auth/login, /auth/refresh -> passed straight through to BookOrbit
   GET  /healthz
 
@@ -39,10 +43,14 @@ import time
 import tomllib
 import uuid
 from datetime import datetime, timezone
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.error import HTTPError
-from urllib.parse import parse_qs, quote, unquote, urlparse
-from urllib.request import Request, urlopen
+from urllib.parse import quote
+from urllib.request import Request as UrlRequest, urlopen
+
+import uvicorn
+from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi.responses import JSONResponse, StreamingResponse
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 BASE = os.environ.get("BOOKORBIT_URL", "http://127.0.0.1:3000").rstrip("/")
 CACHE_DIR = os.environ.get("CACHE_DIR", "cache")
@@ -69,7 +77,7 @@ CACHE_MAX_BYTES = int(os.environ.get("CACHE_MAX_BYTES", "0"))   # 0 = no cap, ma
 
 
 def api(path, method="GET", body=None, timeout=30, bearer=""):
-    req = Request(f"{BASE}/api/v1/{path}", method=method)
+    req = UrlRequest(f"{BASE}/api/v1/{path}", method=method)
     if bearer:
         req.add_header("authorization", bearer)
     data = json.dumps(body).encode() if body is not None else None
@@ -117,8 +125,7 @@ def by_author(name, bearer, size=100):
 
 def book_detail(book_id, bearer):
     m = api(f"audiobooks/{book_id}/manifest", bearer=bearer)
-    sweep(book_id, m["assets"])
-    add_book(book_id, m["book"].get("title"), (m["book"].get("authors") or [""])[0])
+    sweep(book_id, m["assets"])   # viewing a book is not a cached file, so no book row here
     return {"id": m["book"]["id"], "title": m["book"]["title"], "authors": m["book"]["authors"],
             "narrators": m["book"]["narrators"], "totalDurationMs": m["totalDurationMs"],
             "revision": m["revision"],
@@ -148,12 +155,11 @@ def save_state(book_id, asset_id, position_ms, bearer):
 
 def connect():
     # path read here, not at import, so a test or a changed CACHE_DIR still lands in the right place
+    os.makedirs(CACHE_DIR, exist_ok=True)   # a fresh CACHE_DIR 500s every route that reads the db
     c = sqlite3.connect(os.path.join(CACHE_DIR, "sidecar.db"))
     c.execute("create table if not exists books(id text primary key, title text, author text)")
     c.execute("create table if not exists tracks(book_id text, asset_id text, ch integer, path text, "
               "size integer, mtime real, primary key(book_id, asset_id, ch))")
-    # one row: the app's current state, so it can reopen where it left off
-    c.execute("create table if not exists state(id integer primary key check(id = 1), book_id text, author text)")
     return c
 
 
@@ -175,26 +181,15 @@ def add_entry(book_id, asset, ch, path, bearer=""):
     prune(c)
 
 
-def load_db():
-    c = connect()
-    rows = c.execute("select book_id, asset_id, ch, path, size from tracks order by mtime desc").fetchall()
-    s = c.execute("select book_id, author from state where id = 1").fetchone()
-    if s:
-        rows.append(("state", s[1], "", "", 0))     # the app's current state, never pruned
-    return rows
-
-
 def cached_books():
-    c = connect()
-    return [{"id": r[0], "title": r[1], "authors": [r[2]]} for r in c.execute(
-        "select distinct b.id, b.title, b.author from books b join tracks t on t.book_id = b.id "
-        "order by b.author, b.title")]
+    # books rows only exist while they have a cached track, so the index is the cache
+    return [{"id": r[0], "title": r[1], "authors": [r[2]]} for r in connect().execute(
+        "select id, title, author from books order by author, title")]
 
 
 def cached_authors(bearer):
     # every author that has books, not only the ones this sidecar cached
-    cached = {r[0]: r[1] for r in connect().execute(
-        "select b.author, count(distinct t.book_id) from books b join tracks t on t.book_id = b.id group by b.author")}
+    cached = {r[0]: r[1] for r in connect().execute("select author, count(*) from books group by author")}
     out, page = [], 0
     while True:
         items = api(f"authors?size=100&page={page}&minBookCount=1", bearer=bearer).get("items", []) or []
@@ -205,24 +200,14 @@ def cached_authors(bearer):
         page += 1
 
 
-def app_state():
-    r = connect().execute("select book_id, author from state where id = 1").fetchone()
-    return {"book": r[0], "author": r[1]} if r else None
-
-
-def save_app_state(book_id, author):
-    c = connect()
-    cur = app_state() or {}
-    c.execute("insert or replace into state values(1,?,?)",
-              (str(book_id) if book_id else cur.get("book") or "",
-               author if author is not None else cur.get("author") or ""))
-    c.commit()
-    return app_state()
+def drop_book(c, book_id):
+    # a book row only exists while it has cached audio - the index mirrors what is on disk
+    if not c.execute("select 1 from tracks where book_id = ?", (str(book_id),)).fetchone():
+        c.execute("delete from books where id = ?", (str(book_id),))
 
 
 def prune(c):
-    """Keep the newest book per author plus the app's current book, oldest first, until CACHE_MAX_BYTES.
-    The state row is never dropped - that is what the app reopens on."""
+    """Keep the newest book per author, oldest first, until CACHE_MAX_BYTES."""
     if not CACHE_MAX_BYTES:
         return
     rows = c.execute("select t.book_id, b.author, t.size, t.path from tracks t join books b on b.id = t.book_id "
@@ -231,7 +216,7 @@ def prune(c):
     for r in sorted(c.execute("select t.book_id, b.author, t.mtime from tracks t join books b on b.id = t.book_id"),
                     key=lambda r: r[2], reverse=True):
         newest.setdefault(r[1], r[0])
-    keep = set(newest.values()) | ({r[0] for r in c.execute("select book_id from state where id = 1")})
+    keep = set(newest.values())
     total = sum(r[2] for r in rows)
     for b, a, s, p in rows:
         if total <= CACHE_MAX_BYTES:
@@ -241,6 +226,7 @@ def prune(c):
         if os.path.exists(p):
             os.remove(p)
         c.execute("delete from tracks where path = ?", (p,))
+        drop_book(c, b)
         total -= s
     c.execute("delete from books where id not in (select distinct book_id from tracks)")
     c.commit()
@@ -275,6 +261,7 @@ def sweep(book_id, assets):
     for (p,) in c.execute("select path from tracks where book_id = ?", (str(book_id),)).fetchall():
         if not os.path.exists(p):
             c.execute("delete from tracks where path = ?", (p,))
+    drop_book(c, book_id)
     c.commit()
 
 
@@ -331,7 +318,7 @@ def transcode(src, dst, from_ms=0, span_ms=0):
 
 
 def open_asset(book_id, asset_id, bearer):
-    req = Request(asset_url(book_id, asset_id))
+    req = UrlRequest(asset_url(book_id, asset_id))
     if bearer:
         req.add_header("authorization", bearer)
     return urlopen(req, timeout=120)
@@ -381,111 +368,162 @@ def ensure_track(book_id, asset_id, ch_idx, bearer):
         return dst
 
 
-def send_file(path, from_ms, send):
+def find_start(path, from_ms):
+    """Byte offset to serve from. A proportional offset can land mid-frame, so re-anchor to a sync word."""
+    if not from_ms:
+        return 0
+    pos = int(from_ms * BYTES_PER_MS)
+    # shortcut: assumes CBR and ignores the tag/info header, so a resume can be a few ms late.
     with open(path, "rb") as f:
-        if from_ms:
-            pos = int(from_ms * BYTES_PER_MS)
-            # shortcut: byte offset assumes CBR and ignores the tag/info header; find_sync
-            # re-anchors to the next frame from pos, so a resume can be a few ms late.
-            w = f.read(pos + 4096)
-            f.seek(find_sync(w, pos))
+        return min(find_sync(f.read(pos + 4096), pos), os.path.getsize(path))
+
+
+def send_file(path, start=0):
+    with open(path, "rb") as f:
+        f.seek(start)
         while (chunk := f.read(8192)):
-            send(chunk)
+            yield chunk
+
+
+# --- HTTP layer ---------------------------------------------------------------
+
+app = FastAPI()
+
+
+def fail(message, code):
+    return JSONResponse({"error": message}, status_code=code)
+
+
+@app.exception_handler(HTTPError)
+def bookorbit_error(request, e):
+    return fail(f"bookorbit {e.code}", e.code)
+
+
+@app.exception_handler(StarletteHTTPException)
+def http_error(request, e):
+    return fail(e.detail, e.status_code)
+
+
+@app.exception_handler(Exception)
+def other_error(request, e):
+    return fail(str(e), 500)     # noqa: BLE001 - the device needs the reason
+
+
+async def read_body(request):
+    return json.loads(await request.body() or b"{}")
+
+
+def raw_token(request: Request) -> str:
+    """The device owns the session, we only carry it. The audio library builds its own request line
+    and cannot add a header, so the stream request passes the token as ?token=."""
+    if h := request.headers.get("authorization"):
+        return h
+    tok = request.query_params.get("token")
+    return f"Bearer {tok}" if tok else ""
+
+
+def bearer(request: Request) -> str:
+    b = raw_token(request)
+    if not b:
+        raise HTTPException(401, "no token")
+    return b
+
+
+@app.middleware("http")
+async def access_log(request, call_next):
+    response = await call_next(request)
+    print(f"{request.method} {request.url.path} {response.status_code}")   # path only: no token logged
+    return response
+
+
+@app.get("/healthz")
+def healthz():
+    return {"ok": True, "ffmpeg": bool(shutil.which("ffmpeg")), "version": version()}
+
+
+@app.get("/books")
+def books(b: str = Depends(bearer)):
+    return cached_books()
+
+
+@app.get("/library")
+def library_route(b: str = Depends(bearer)):
+    return library(b)
+
+
+@app.get("/authors")
+def authors(b: str = Depends(bearer)):
+    return cached_authors(b)
+
+
+@app.get("/authors/{name}/books")
+def author_books(name: str, b: str = Depends(bearer)):
+    return by_author(name, b)
+
+
+@app.get("/state")
+def state_route(book: str = "", b: str = Depends(bearer)):
+    # nothing is stored here - BookOrbit owns playback state, the sidecar only forwards
+    if not book:
+        return fail("state needs ?book=", 400)
+    return book_state(book, b)
+
+
+@app.put("/state")
+async def put_state(request: Request, b: str = Depends(bearer)):
+    body = await read_body(request)
+    if not body.get("book"):
+        return fail("state needs a book", 400)
+    return save_state(body["book"], body["assetId"], int(body["positionMs"]), b)
+
+
+@app.get("/books/{book_id}")
+def get_book(book_id: str, b: str = Depends(bearer)):
+    return book_detail(book_id, b)
+
+
+@app.get("/books/{book_id}/state")
+def get_book_state(book_id: str, b: str = Depends(bearer)):
+    return book_state(book_id, b)
+
+
+@app.put("/books/{book_id}/state")
+async def put_book_state(book_id: str, request: Request, b: str = Depends(bearer)):
+    body = await read_body(request)
+    return save_state(book_id, body["assetId"], int(body["positionMs"]), b)
+
+
+# the device logs in and refreshes on its own; we only forward the credential it sends
+@app.post("/auth/{action}")
+async def auth(action: str, request: Request, b: str = Depends(raw_token)):
+    # login is how the device gets its token, so there is none to carry
+    if action not in ("login", "refresh"):
+        return fail("not found", 404)
+    return api("auth/" + action, "POST", await read_body(request), bearer=b)
+
+
+@app.get("/track/{book_id}/{asset_id}")
+def track(book_id: str, asset_id: str, from_ms: int = 0, chapter: int | None = None, b: str = Depends(bearer)):
+    path = ensure_track(book_id, asset_id, chapter, b)
+    start = find_start(path, from_ms)
+    # content-length is what we actually send: the device only stores a track when this matches the
+    # bytes it received, and h11 raises "Too little data for declared Content-Length" if we promise more.
+    return StreamingResponse(send_file(path, start), media_type="audio/mpeg",
+                             headers={"content-length": str(os.path.getsize(path) - start)})
+
+
+@app.get("/track")
+def track_by_chapter(book: str, chapter: int, from_ms: int = 0, b: str = Depends(bearer)):
+    # the player knows chapter numbers, not asset ids, so resolve here instead of making it fetch the manifest
+    ch = book_detail(book, b)["chapters"][chapter]
+    return track(book, ch["assetId"], from_ms, chapter, b)
 
 
 def main():
-    class Handler(BaseHTTPRequestHandler):
-        def json(self, obj, code=200):
-            body = json.dumps(obj).encode()
-            self.send_response(code)
-            self.send_header("content-type", "application/json")
-            self.send_header("content-length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
-
-        def bearer(self):
-            # the device owns the session, we only carry it. The audio library builds its own request
-            # line and cannot add a header, so the stream request passes the token as ?token=
-            if h := self.headers.get("authorization"):
-                return h
-            tok = (parse_qs(urlparse(self.path).query).get("token") or [""])[0]
-            return f"Bearer {tok}" if tok else ""
-
-        def log_message(self, fmt, *args):
-            # keep the token out of the access log
-            super().log_message(fmt, *[(a.replace("token=", "token=REDACTED") if isinstance(a, str) else a)
-                                       for a in args])
-
-        def do_GET(self):
-            u = urlparse(self.path)
-            parts = [p for p in u.path.split("/") if p]
-            try:
-                if parts == ["healthz"]:
-                    return self.json({"ok": True, "ffmpeg": bool(shutil.which("ffmpeg")), "version": version()})
-                b = self.bearer()
-                if not b:
-                    return self.json({"error": "no token"}, 401)
-                if parts == ["books"]:
-                    return self.json(cached_books())
-                if parts == ["library"]:
-                    return self.json(library(b))
-                if parts == ["authors"]:
-                    return self.json(cached_authors(b))
-                if len(parts) == 3 and parts[0] == "authors" and parts[2] == "books":
-                    return self.json(by_author(unquote(parts[1]), b))
-                if parts == ["state"]:
-                    return self.json(app_state())
-                if len(parts) == 2 and parts[0] == "books":
-                    return self.json(book_detail(parts[1], b))
-                if len(parts) == 3 and parts[0] == "books" and parts[2] == "state":
-                    return self.json(book_state(parts[1], b))
-                if len(parts) == 3 and parts[0] == "track":
-                    q = parse_qs(u.query)
-                    from_ms = int((q.get("from_ms") or ["0"])[0])
-                    ch = q.get("chapter")
-                    path = ensure_track(parts[1], parts[2], int(ch[0]) if ch else None, b)
-                    self.send_response(200)
-                    self.send_header("content-type", "audio/mpeg")
-                    # the device only stores a track when this matches what it received
-                    self.send_header("content-length", str(os.path.getsize(path)))
-                    self.end_headers()
-                    send_file(path, from_ms, self.wfile.write)
-                    return
-                self.json({"error": "not found"}, 404)
-            except HTTPError as e:
-                self.json({"error": f"bookorbit {e.code}"}, e.code)
-            except Exception as e:                                   # noqa: BLE001 - the device needs the reason
-                self.json({"error": str(e)}, 500)
-
-        def do_POST(self):
-            # the device logs in and refreshes on its own; we only forward the credential it sends
-            parts = [p for p in urlparse(self.path).path.split("/") if p]
-            body = json.loads(self.rfile.read(int(self.headers.get("content-length", 0))) or b"{}")
-            try:
-                if parts == ["auth", "login"] or parts == ["auth", "refresh"]:
-                    return self.json(api("auth/" + parts[1], "POST", body, bearer=self.bearer()))
-                self.json({"error": "not found"}, 404)
-            except HTTPError as e:
-                self.json({"error": f"bookorbit {e.code}"}, e.code)
-
-        def do_PUT(self):
-            u = urlparse(self.path)
-            parts = [p for p in u.path.split("/") if p]
-            try:
-                body = json.loads(self.rfile.read(int(self.headers.get("content-length", 0))) or b"{}")
-                if parts == ["state"]:
-                    return self.json(save_app_state(body.get("book"), body.get("author")))
-                if len(parts) == 3 and parts[0] == "books" and parts[2] == "state":
-                    return self.json(save_state(parts[1], body["assetId"], int(body["positionMs"]), self.bearer()))
-                self.json({"error": "not found"}, 404)
-            except HTTPError as e:
-                self.json({"error": f"bookorbit {e.code}"}, e.code)
-            except Exception as e:                                   # noqa: BLE001
-                self.json({"error": str(e)}, 500)
-
-    httpd = ThreadingHTTPServer(("0.0.0.0", PORT), Handler)
     print(f"sidecar on :{PORT} -> {BASE}, cache {CACHE_DIR}")   # plain http, TLS ends at the proxy
-    httpd.serve_forever()
+    # shortcut: sync routes share uvicorn's default 40-worker pool (the old server took one thread per
+    # request); pass workers=4 if a prefetch burst can ever run more than 40 transcodes at once.
+    uvicorn.run(app, host="0.0.0.0", port=PORT, access_log=False)
 
 
 if __name__ == "__main__":

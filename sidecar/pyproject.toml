@@ -2,7 +2,10 @@
 name = "espaudiobook-sidecar"
 version = "0.1.7"
 requires-python = ">=3.13"
-dependencies = []
+dependencies = ["fastapi", "uvicorn"]
+
+[dependency-groups]
+dev = ["httpx"]
 
 [tool.uv]
 package = false
